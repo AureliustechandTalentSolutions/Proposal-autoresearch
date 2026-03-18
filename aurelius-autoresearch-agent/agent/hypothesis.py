@@ -75,15 +75,6 @@ PERSONA_PROMPTS = {
 }
 
 
-class Hypothesis:
-    """Represents a hypothesis for improving an artifact."""
-    def __init__(self, id: str, description: str, expected_impact: str, risk: str, priority: int):
-        self.id = id
-        self.description = description
-        self.expected_impact = expected_impact
-        self.risk = risk
-        self.priority = priority
-
 
 class HypothesisGenerator:
     """Generates improvement hypotheses using LLM analysis."""

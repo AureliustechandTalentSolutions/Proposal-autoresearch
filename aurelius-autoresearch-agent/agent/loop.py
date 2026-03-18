@@ -23,6 +23,7 @@ PERSONAS = [
     "capture_manager",
     "solution_architect",
     "customer_advocate",
+    "pricing_analyst",
     "devsecops_expert",
     "di_champion",
 ]

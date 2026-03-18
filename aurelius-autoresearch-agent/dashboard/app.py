@@ -105,10 +105,20 @@ async def list_runs():
     return {"runs": runs}
 
 
+def _validate_run_id(run_id: str) -> Path:
+    """Validate run_id to prevent path traversal."""
+    if "/" in run_id or "\\" in run_id or ".." in run_id:
+        raise HTTPException(status_code=400, detail="Invalid run ID")
+    run_dir = (RUNS_DIR / run_id).resolve()
+    if not str(run_dir).startswith(str(RUNS_DIR.resolve())):
+        raise HTTPException(status_code=400, detail="Invalid run ID")
+    return run_dir
+
+
 @app.get("/api/runs/{run_id}")
 async def get_run(run_id: str):
     """Get specific run details."""
-    run_dir = RUNS_DIR / run_id
+    run_dir = _validate_run_id(run_id)
     if not run_dir.exists():
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
@@ -128,7 +138,7 @@ async def run_progress_stream(run_id: str):
     """SSE stream of run progress updates."""
 
     async def event_generator():
-        run_dir = RUNS_DIR / run_id
+        run_dir = _validate_run_id(run_id)
         last_data = None
 
         while True:
@@ -169,7 +179,8 @@ async def run_progress_stream(run_id: str):
 @app.get("/api/runs/{run_id}/report")
 async def get_run_report(run_id: str):
     """Get the markdown report for a run."""
-    report_path = RUNS_DIR / run_id / "report.md"
+    run_dir = _validate_run_id(run_id)
+    report_path = run_dir / "report.md"
     if not report_path.exists():
         raise HTTPException(status_code=404, detail=f"Report not found for run {run_id}")
     return {"report": report_path.read_text()}

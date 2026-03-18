@@ -85,21 +85,30 @@ class OllamaProvider:
         self.base_url = (base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
 
     async def complete(self, system_prompt: str, user_message: str, max_tokens: int = 4096) -> str:
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.post(
-                f"{self.base_url}/api/chat",
-                json={
-                    "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message},
-                    ],
-                    "stream": False,
-                    "options": {"num_predict": max_tokens},
-                },
-            )
-            response.raise_for_status()
-            return response.json()["message"]["content"]
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=300.0) as client:
+                    response = await client.post(
+                        f"{self.base_url}/api/chat",
+                        json={
+                            "model": self.model,
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_message},
+                            ],
+                            "stream": False,
+                            "options": {"num_predict": max_tokens},
+                        },
+                    )
+                response.raise_for_status()
+                return response.json()["message"]["content"]
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                wait = 2 ** (attempt + 1)
+                logger.warning(f"Ollama API error (attempt {attempt + 1}/3): {e}. Retrying in {wait}s...")
+                await asyncio.sleep(wait)
+        return ""
 
 
 def get_llm(provider: str = "claude", model: str = "claude-sonnet-4-20250514") -> LLMProvider:

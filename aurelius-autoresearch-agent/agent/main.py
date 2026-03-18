@@ -117,6 +117,7 @@ async def cmd_run(args):
         config=config, llm=llm, scorer=scorer, constraints=constraints,
         audit=audit, learnings=learnings, hypothesis_gen=hypothesis_gen, modifier=modifier,
     )
+    loop.run_id = run_id  # Sync run_id so CLI status/report can find the run
 
     print(f"Starting autoresearch loop.")
     print(f"  Run ID: {loop.run_id}")
