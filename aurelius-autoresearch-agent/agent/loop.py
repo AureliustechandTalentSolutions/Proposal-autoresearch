@@ -104,6 +104,9 @@ class AutoresearchLoop:
 
             # 3. Main loop
             for iteration in range(1, self.config.max_iterations + 1):
+                # Yield control to allow cancellation tasks to run
+                await asyncio.sleep(0)
+
                 if self._cancel_event.is_set():
                     halt_reason = "user_interrupt"
                     break

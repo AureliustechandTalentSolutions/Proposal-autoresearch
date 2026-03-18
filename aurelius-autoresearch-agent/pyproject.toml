@@ -2,7 +2,7 @@
 name = "aurelius-autoresearch-agent"
 version = "0.1.0"
 description = "Autonomous federal compliance and proposal optimization agent"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.40.0",
     "openai>=1.50.0",
@@ -22,4 +22,7 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.24.0"]
 
 [build-system]
 requires = ["setuptools>=75.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["agent*", "scorers*", "config*", "dashboard*"]

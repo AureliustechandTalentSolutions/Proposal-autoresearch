@@ -40,12 +40,15 @@ class MockLLM:
 class MockScorer:
     """Mock scorer that returns increasing or flat scores."""
 
-    def __init__(self, scores=None):
+    def __init__(self, scores=None, delay: float = 0.0):
         self._scores = scores or [60.0, 65.0, 70.0, 75.0, 80.0]
         self._idx = 0
         self._last_details = {}
+        self._delay = delay
 
     async def score(self, content, context=None):
+        if self._delay > 0:
+            await asyncio.sleep(self._delay)
         score = self._scores[min(self._idx, len(self._scores) - 1)]
         self._idx += 1
         return score
@@ -166,7 +169,7 @@ async def test_loop_cancellation():
         learnings = LearningsStore(run_dir / "learnings.yaml")
         constraints = ConstraintValidator([])
         llm = MockLLM()
-        scorer = MockScorer(scores=[50.0] * 100)
+        scorer = MockScorer(scores=[50.0] * 100, delay=0.05)
         hypothesis_gen = HypothesisGenerator(llm, "proposal", learnings)
         modifier = ArtifactModifier(llm)
 
@@ -177,7 +180,7 @@ async def test_loop_cancellation():
 
         # Cancel after brief delay
         async def cancel_after_delay():
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.15)
             await loop.cancel()
 
         asyncio.create_task(cancel_after_delay())
