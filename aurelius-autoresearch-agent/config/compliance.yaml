@@ -1,0 +1,13 @@
+mode: compliance
+max_iterations: 25
+threshold: 95.0
+llm_provider: claude
+llm_model: claude-sonnet-4-20250514
+constraints:
+  - valid_yaml
+  - no_fabricated_evidence
+scorer_weights:
+  nist_coverage: 0.40
+  stig_pass: 0.30
+  poam_reduction: 0.20
+  sprs_normalized: 0.10

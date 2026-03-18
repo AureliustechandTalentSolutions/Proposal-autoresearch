@@ -1,0 +1,7 @@
+mode: proposal
+max_iterations: 25
+threshold: 90.0
+llm_provider: claude
+llm_model: claude-sonnet-4-20250514
+constraints: []
+scorer_weights: {}

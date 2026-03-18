@@ -1,0 +1,16 @@
+mode: proposal
+max_iterations: 30
+threshold: 90.0
+llm_provider: claude
+llm_model: claude-sonnet-4-20250514
+constraints:
+  - page_limit
+  - readability_range
+  - no_fabrication
+scorer_weights:
+  eval_alignment: 0.35
+  traceability: 0.20
+  readability: 0.15
+  discriminators: 0.15
+  win_themes: 0.10
+  page_utilization: 0.05
