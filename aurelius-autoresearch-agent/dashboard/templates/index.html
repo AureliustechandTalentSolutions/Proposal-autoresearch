@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aurelius Autoresearch Agent</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+        .header {
+            background: #16213e;
+            padding: 1rem 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 2px solid #c9a227;
+        }
+        .header h1 {
+            color: #c9a227;
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+        }
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #555;
+        }
+        .status-dot.running {
+            background: #4caf50;
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .container { max-width: 1400px; margin: 0 auto; padding: 1.5rem; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }
+        .panel {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 1.5rem;
+            border: 1px solid #2a2a4a;
+        }
+        .panel h2 {
+            color: #c9a227;
+            font-size: 1.1rem;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid #2a2a4a;
+        }
+        .score-display {
+            display: flex;
+            gap: 2rem;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+        }
+        .score-box {
+            text-align: center;
+        }
+        .score-box .value {
+            font-size: 2.5rem;
+            font-weight: 700;
+            color: #c9a227;
+        }
+        .score-box .label {
+            font-size: 0.8rem;
+            color: #888;
+            text-transform: uppercase;
+        }
+        .score-box .delta {
+            font-size: 1rem;
+            font-weight: 600;
+        }
+        .delta.positive { color: #4caf50; }
+        .delta.negative { color: #f44336; }
+        .progress-bar {
+            background: #2a2a4a;
+            border-radius: 4px;
+            height: 8px;
+            margin: 1rem 0;
+            overflow: hidden;
+        }
+        .progress-bar .fill {
+            background: linear-gradient(90deg, #c9a227, #e8d48b);
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.5s ease;
+        }
+        .chart-container {
+            position: relative;
+            height: 250px;
+            margin: 1rem 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+        }
+        th, td {
+            padding: 0.5rem 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid #2a2a4a;
+        }
+        th {
+            color: #c9a227;
+            font-weight: 600;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+        }
+        .keep { color: #4caf50; font-weight: 600; }
+        .discard { color: #f44336; font-weight: 600; }
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 0.3rem;
+            font-size: 0.85rem;
+            color: #aaa;
+        }
+        .form-group input, .form-group select, .form-group textarea {
+            width: 100%;
+            padding: 0.5rem;
+            background: #1a1a2e;
+            border: 1px solid #2a2a4a;
+            border-radius: 4px;
+            color: #e0e0e0;
+            font-size: 0.9rem;
+        }
+        .form-group textarea { resize: vertical; min-height: 60px; }
+        .form-group input:focus, .form-group select:focus, .form-group textarea:focus {
+            outline: none;
+            border-color: #c9a227;
+        }
+        .btn {
+            padding: 0.6rem 1.5rem;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 600;
+            transition: opacity 0.2s;
+        }
+        .btn:hover { opacity: 0.85; }
+        .btn-primary { background: #c9a227; color: #1a1a2e; }
+        .btn-danger { background: #f44336; color: white; }
+        .btn-sm { padding: 0.3rem 0.8rem; font-size: 0.8rem; }
+        .iteration-table-wrapper {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 2rem;
+            color: #666;
+        }
+        #runHistory { grid-column: 1 / -1; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Aurelius Autoresearch Agent</h1>
+        <div class="status-indicator">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">Idle</span>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="grid">
+            <div class="panel" id="activeRun">
+                <h2>Active Run</h2>
+                <div id="activeRunContent">
+                    <div class="empty-state">No active run. Start one from the form.</div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>Start New Run</h2>
+                <form id="startForm" onsubmit="startRun(event)">
+                    <div class="form-group">
+                        <label>Mode</label>
+                        <select name="mode" required>
+                            <option value="proposal">Proposal Optimization</option>
+                            <option value="compliance">Compliance Optimization</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Target File Path</label>
+                        <input type="text" name="target_path" placeholder="/workspace/proposal.md" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Metric</label>
+                        <input type="text" name="metric" placeholder="eval_alignment" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Threshold (0-100)</label>
+                        <input type="number" name="threshold" value="90" min="0" max="100" step="0.1" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Max Iterations</label>
+                        <input type="number" name="max_iterations" value="25" min="1" max="1000">
+                    </div>
+                    <div class="form-group">
+                        <label>LLM Provider</label>
+                        <select name="llm_provider">
+                            <option value="claude">Claude (Anthropic)</option>
+                            <option value="openai">OpenAI / LeapfrogAI</option>
+                            <option value="ollama">Ollama (Local)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Constraints (one per line)</label>
+                        <textarea name="constraints" placeholder="page_limit&#10;readability_range"></textarea>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Start Run</button>
+                </form>
+            </div>
+
+            <div class="panel" id="runHistory">
+                <h2>Run History</h2>
+                <div id="historyContent">
+                    <div class="empty-state">No previous runs.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let scoreChart = null;
+        let eventSource = null;
+        let currentRunId = null;
+
+        // Initialize
+        loadHistory();
+
+        function loadHistory() {
+            fetch('/api/runs')
+                .then(r => r.json())
+                .then(data => {
+                    const container = document.getElementById('historyContent');
+                    if (!data.runs || data.runs.length === 0) {
+                        container.innerHTML = '<div class="empty-state">No previous runs.</div>';
+                        return;
+                    }
+                    let html = '<table><thead><tr><th>Run ID</th><th>Mode</th><th>Baseline</th><th>Final</th><th>Improvement</th><th>Status</th></tr></thead><tbody>';
+                    for (const run of data.runs) {
+                        const improvement = run.improvement_percentage ? run.improvement_percentage.toFixed(1) + '%' : (run.improvement ? run.improvement.toFixed(1) : '-');
+                        html += `<tr>
+                            <td>${run.run_id}</td>
+                            <td>${run.mode || '-'}</td>
+                            <td>${run.baseline_score ? run.baseline_score.toFixed(1) : '-'}</td>
+                            <td>${run.final_score ? run.final_score.toFixed(1) : (run.current_score ? run.current_score.toFixed(1) : '-')}</td>
+                            <td>${improvement}</td>
+                            <td>${run.status}</td>
+                        </tr>`;
+                    }
+                    html += '</tbody></table>';
+                    container.innerHTML = html;
+                })
+                .catch(() => {});
+        }
+
+        function startRun(e) {
+            e.preventDefault();
+            const form = e.target;
+            const body = {
+                mode: form.mode.value,
+                target_path: form.target_path.value,
+                metric: form.metric.value,
+                threshold: parseFloat(form.threshold.value),
+                max_iterations: parseInt(form.max_iterations.value),
+                llm_provider: form.llm_provider.value,
+                constraints: form.constraints.value.split('\n').filter(s => s.trim()),
+            };
+
+            fetch('/api/runs', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body),
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.run_id) {
+                    currentRunId = data.run_id;
+                    connectSSE(data.run_id);
+                    updateStatus(true);
+                }
+            })
+            .catch(err => alert('Failed to start run: ' + err));
+        }
+
+        function connectSSE(runId) {
+            if (eventSource) eventSource.close();
+
+            const container = document.getElementById('activeRunContent');
+            container.innerHTML = `
+                <div class="score-display">
+                    <div class="score-box"><div class="value" id="currentScore">--</div><div class="label">Current</div></div>
+                    <div class="score-box"><div class="value" id="baselineScore">--</div><div class="label">Baseline</div></div>
+                    <div class="score-box"><div class="value" id="deltaScore">--</div><div class="label">Delta</div><div class="delta" id="deltaClass">--</div></div>
+                    <div class="score-box"><div class="value" id="iterCount">0</div><div class="label">Iteration</div></div>
+                </div>
+                <div class="progress-bar"><div class="fill" id="progressFill" style="width: 0%"></div></div>
+                <div class="chart-container"><canvas id="scoreChart"></canvas></div>
+                <div class="iteration-table-wrapper">
+                    <table><thead><tr><th>#</th><th>Hypothesis</th><th>Delta</th><th>Decision</th></tr></thead>
+                    <tbody id="iterationBody"></tbody></table>
+                </div>
+                <div style="margin-top: 1rem;"><button class="btn btn-danger btn-sm" onclick="cancelRun('${runId}')">Cancel Run</button></div>
+            `;
+
+            initChart();
+
+            eventSource = new EventSource(`/api/runs/${runId}/progress`);
+
+            eventSource.addEventListener('progress', function(e) {
+                const data = JSON.parse(e.data);
+                updateDashboard(data);
+            });
+
+            eventSource.addEventListener('done', function(e) {
+                const data = JSON.parse(e.data);
+                updateDashboard(data);
+                updateStatus(false);
+                eventSource.close();
+                loadHistory();
+            });
+
+            eventSource.onerror = function() {
+                setTimeout(() => {
+                    if (currentRunId) connectSSE(currentRunId);
+                }, 5000);
+            };
+        }
+
+        function initChart() {
+            const ctx = document.getElementById('scoreChart');
+            if (!ctx) return;
+            if (scoreChart) scoreChart.destroy();
+            scoreChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Score',
+                        data: [],
+                        borderColor: '#c9a227',
+                        backgroundColor: 'rgba(201, 162, 39, 0.1)',
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 4,
+                        pointBackgroundColor: '#c9a227',
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { title: { display: true, text: 'Iteration', color: '#888' }, ticks: { color: '#888' }, grid: { color: '#2a2a4a' } },
+                        y: { title: { display: true, text: 'Score', color: '#888' }, ticks: { color: '#888' }, grid: { color: '#2a2a4a' }, min: 0, max: 100 }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+        }
+
+        function updateDashboard(data) {
+            document.getElementById('currentScore').textContent = (data.current_score || 0).toFixed(1);
+            document.getElementById('baselineScore').textContent = (data.baseline_score || 0).toFixed(1);
+            const delta = (data.improvement || 0);
+            document.getElementById('deltaScore').textContent = (delta >= 0 ? '+' : '') + delta.toFixed(1);
+            const deltaEl = document.getElementById('deltaClass');
+            deltaEl.textContent = (delta >= 0 ? '+' : '') + delta.toFixed(1);
+            deltaEl.className = 'delta ' + (delta >= 0 ? 'positive' : 'negative');
+            document.getElementById('iterCount').textContent = data.current_iteration || 0;
+
+            // Progress bar
+            const maxIter = 25; // Default
+            const pct = Math.min(100, ((data.current_iteration || 0) / maxIter) * 100);
+            document.getElementById('progressFill').style.width = pct + '%';
+
+            // Update chart
+            if (scoreChart && data.iterations) {
+                const labels = ['Baseline'];
+                const scores = [data.baseline_score || 0];
+                let runningScore = data.baseline_score || 0;
+                for (const iter of data.iterations) {
+                    if (iter.decision === 'KEEP') {
+                        runningScore = iter.score_after;
+                    }
+                    labels.push('It ' + iter.iteration);
+                    scores.push(runningScore);
+                }
+                scoreChart.data.labels = labels;
+                scoreChart.data.datasets[0].data = scores;
+                scoreChart.update('none');
+            }
+
+            // Update iteration table
+            if (data.iterations) {
+                const tbody = document.getElementById('iterationBody');
+                let html = '';
+                for (const iter of data.iterations) {
+                    const hyp = iter.hypothesis ? (iter.hypothesis.description || '').substring(0, 60) : '-';
+                    const cls = iter.decision === 'KEEP' ? 'keep' : 'discard';
+                    html += `<tr><td>${iter.iteration}</td><td>${hyp}</td><td>${(iter.delta || 0).toFixed(2)}</td><td class="${cls}">${iter.decision}</td></tr>`;
+                }
+                tbody.innerHTML = html;
+            }
+        }
+
+        function cancelRun(runId) {
+            fetch(`/api/runs/${runId}`, { method: 'DELETE' })
+                .then(r => r.json())
+                .then(() => updateStatus(false))
+                .catch(err => alert('Failed to cancel: ' + err));
+        }
+
+        function updateStatus(running) {
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+            if (running) {
+                dot.className = 'status-dot running';
+                text.textContent = 'Running';
+            } else {
+                dot.className = 'status-dot';
+                text.textContent = 'Idle';
+                currentRunId = null;
+            }
+        }
+    </script>
+</body>
+</html>

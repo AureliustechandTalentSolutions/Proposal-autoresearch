@@ -1,0 +1,35 @@
+services:
+  autoresearch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aurelius-autoresearch
+    ports:
+      - "${DASHBOARD_PORT:-8501}:8501"
+    volumes:
+      - ./workspace:/workspace
+      - ./runs:/app/runs
+      - ./config:/app/config
+    env_file: .env
+    restart: unless-stopped
+    command: python -m uvicorn dashboard.app:app --host 0.0.0.0 --port 8501
+
+  # Optional local LLM - activate with: docker compose --profile local-llm up
+  ollama:
+    image: ollama/ollama:latest
+    container_name: aurelius-ollama
+    profiles: ["local-llm"]
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  ollama_data:
