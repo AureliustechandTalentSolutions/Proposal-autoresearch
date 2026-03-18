@@ -369,20 +369,17 @@ class TestDependencySecurity:
         pyproject_path = Path(__file__).parent.parent / "pyproject.toml"
         content = pyproject_path.read_text()
 
-        # All dependencies should have version constraints
+        # Extract the main dependencies block using a greedy match for balanced brackets
         import re
         deps_match = re.search(
-            r'dependencies\s*=\s*\[(.*?)\]', content, re.DOTALL
+            r'^dependencies\s*=\s*\[(.*?)\]', content, re.DOTALL | re.MULTILINE
         )
         assert deps_match, "No dependencies section found"
         deps_text = deps_match.group(1)
 
-        # Each dep line should contain >= or == or ~=
-        dep_lines = [
-            line.strip().strip('"').strip("'").strip(",")
-            for line in deps_text.strip().splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ]
+        # Extract individual dependency strings (quoted strings within the list)
+        dep_lines = re.findall(r'"([^"]+)"', deps_text)
+        assert len(dep_lines) > 0, "No dependencies found"
         for dep in dep_lines:
             assert ">=" in dep or "==" in dep or "~=" in dep, (
                 f"Dependency {dep!r} has no version pin"
@@ -409,7 +406,13 @@ class TestDependencySecurity:
         pyproject_path = Path(__file__).parent.parent / "pyproject.toml"
         content = pyproject_path.read_text()
         import re
-        # Look for patterns like "package==*" or "package>=*"
-        assert not re.search(r'"[a-z].*\*"', content), (
+        # Look for patterns like "package==*" or "package>=*" in the dependencies section only
+        deps_match = re.search(
+            r'^dependencies\s*=\s*\[(.*?)\]', content, re.DOTALL | re.MULTILINE
+        )
+        assert deps_match, "No dependencies section found"
+        deps_text = deps_match.group(1)
+        # Check for wildcard version specifiers (e.g., ==*, >=*)
+        assert not re.search(r'[><=~!]=\s*\*', deps_text), (
             "Wildcard version found in dependencies"
         )

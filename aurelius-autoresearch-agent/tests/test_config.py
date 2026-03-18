@@ -120,3 +120,52 @@ def test_run_result_markdown_report():
     assert "# Autoresearch Run Report" in report
     assert "Harden security context" in report
     assert "KEEP" in report
+
+
+def test_run_config_max_iterations_zero_fails():
+    """max_iterations=0 should fail validation since ge=1."""
+    from agent.config import RunConfig
+    with pytest.raises(Exception):
+        RunConfig(
+            mode="proposal",
+            target_path=Path("/x"),
+            metric="m",
+            threshold=90.0,
+            max_iterations=0,
+        )
+
+
+def test_run_result_zero_baseline_score():
+    """improvement_percentage should be 0 when baseline_score is 0, not a division error."""
+    from agent.config import RunResult, RunConfig, Hypothesis, IterationResult
+    config = RunConfig(mode="proposal", target_path=Path("/x"), metric="m", threshold=90.0)
+    h = Hypothesis(description="Test", expected_impact="High", risk="low", priority=1)
+    result = RunResult(
+        run_id="test-zero",
+        config=config,
+        baseline_score=0.0,
+        final_score=10.0,
+        total_improvement=10.0,
+        iterations=[
+            IterationResult(iteration=1, hypothesis=h, score_before=0.0, score_after=10.0,
+                          delta=10.0, decision="KEEP", rationale="Good",
+                          artifact_hash_before="a", artifact_hash_after="b",
+                          diff="diff", duration_seconds=1.0)
+        ],
+        learnings=[],
+        halt_reason="max_iterations",
+        started_at=datetime(2026, 1, 1),
+        completed_at=datetime(2026, 1, 1, 1, 0),
+    )
+    # Should return 0.0, not raise ZeroDivisionError
+    assert result.improvement_percentage == 0.0
+
+
+def test_hypothesis_frozen_immutability():
+    """Hypothesis model should be frozen / immutable."""
+    from agent.config import Hypothesis
+    h = Hypothesis(description="Test", expected_impact="High", risk="low", priority=1)
+    with pytest.raises(Exception):
+        h.description = "Modified"
+    with pytest.raises(Exception):
+        h.priority = 99

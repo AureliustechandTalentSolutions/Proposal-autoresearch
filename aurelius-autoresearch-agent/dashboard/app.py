@@ -194,6 +194,21 @@ async def start_run(request: Request):
 
         config = RunConfig(**body)
 
+        # Validate target_path: must exist and must be within the workspace
+        target = config.target_path
+        if not target.exists():
+            raise ValueError(f"Target file does not exist: {target}")
+        # Prevent path traversal: resolve and check it's under the allowed workspace
+        workspace_dir = BASE_DIR / "workspace"
+        workspace_dir.mkdir(exist_ok=True)
+        try:
+            resolved = target.resolve()
+            if not (str(resolved).startswith(str(BASE_DIR.resolve()))
+                    or str(resolved).startswith(str(workspace_dir.resolve()))):
+                raise ValueError(f"Target path is outside the allowed workspace: {target}")
+        except (OSError, ValueError) as path_err:
+            raise ValueError(f"Invalid target path: {path_err}")
+
         # Initialize components
         llm = get_llm(config.llm_provider, config.llm_model)
 

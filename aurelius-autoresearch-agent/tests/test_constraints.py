@@ -99,3 +99,45 @@ def test_discard_violation():
     ok, violations = v.validate(" ".join(["word"] * 20))
     assert not ok
     assert not v.has_halt_violation(violations)
+
+
+def test_multiple_constraints_one_pass_one_fail():
+    """When one constraint passes and another fails, validation should fail."""
+    c_pass = Constraint(name="wc_pass", description="", validation_type="word_count",
+                        parameters={"min": 1, "max": 1000})
+    c_fail = Constraint(name="wc_fail", description="", validation_type="word_count",
+                        parameters={"min": 100})
+    v = ConstraintValidator([c_pass, c_fail])
+    ok, violations = v.validate("Just a few words")
+    assert not ok
+    assert len(violations) == 1
+    assert "wc_fail" in violations[0]
+
+
+def test_empty_artifact_string():
+    """Constraint validation with empty artifact string."""
+    c = Constraint(name="wc", description="", validation_type="word_count",
+                   parameters={"min": 1})
+    v = ConstraintValidator([c])
+    ok, violations = v.validate("")
+    assert not ok
+    assert len(violations) == 1
+
+
+def test_readability_range_constraint_with_real_text():
+    """readability_range constraint with real text."""
+    c = Constraint(name="read", description="", validation_type="readability_range",
+                   parameters={"min": 6, "max": 14})
+    v = ConstraintValidator([c])
+    # Text with moderate sentence length and vocabulary to land in grade 6-14 range
+    text = (
+        "The project team will complete all deliverables within the proposed schedule. "
+        "Our approach uses proven methods that reduce risk and improve quality. "
+        "Each phase includes testing and validation before moving to the next stage. "
+        "Staff members bring an average of fifteen years of relevant experience to this contract. "
+        "We maintain compliance with all applicable federal regulations and industry standards. "
+        "Monthly progress reports will be submitted to the contracting officer for review and approval."
+    )
+    ok, violations = v.validate(text)
+    assert ok, f"Readability constraint failed: {violations}"
+    assert len(violations) == 0

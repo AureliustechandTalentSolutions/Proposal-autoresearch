@@ -178,9 +178,10 @@ async def test_loop_cancellation():
             audit=audit, learnings=learnings, hypothesis_gen=hypothesis_gen, modifier=modifier,
         )
 
-        # Cancel after brief delay
+        # Cancel after brief delay — must fire before 3 no-improvement
+        # iterations complete (which would trigger plateau detection)
         async def cancel_after_delay():
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.08)
             await loop.cancel()
 
         asyncio.create_task(cancel_after_delay())
@@ -220,3 +221,92 @@ async def test_audit_trail_created():
         assert (run_dir / "audit.jsonl").exists()
         assert (run_dir / "result.json").exists()
         assert (run_dir / "report.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_audit_files_contain_valid_data():
+    """Verify that audit files contain valid JSON/YAML after a run."""
+    import json
+    import yaml
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        target = Path(tmpdir) / "artifact.md"
+        target.write_text("Test artifact content for audit validation")
+
+        config = RunConfig(
+            mode="proposal", target_path=target, metric="test",
+            threshold=95.0, max_iterations=2,
+        )
+
+        run_dir = Path(tmpdir) / "run"
+        audit = AuditTrail(run_dir)
+        learnings = LearningsStore(run_dir / "learnings.yaml")
+        constraints = ConstraintValidator([])
+        llm = MockLLM()
+        scorer = MockScorer(scores=[50.0, 55.0, 60.0])
+        hypothesis_gen = HypothesisGenerator(llm, "proposal", learnings)
+        modifier = ArtifactModifier(llm)
+
+        loop = AutoresearchLoop(
+            config=config, llm=llm, scorer=scorer, constraints=constraints,
+            audit=audit, learnings=learnings, hypothesis_gen=hypothesis_gen, modifier=modifier,
+        )
+
+        await loop.run()
+
+        # Validate audit.jsonl contains valid JSON lines
+        audit_lines = (run_dir / "audit.jsonl").read_text().strip().split("\n")
+        assert len(audit_lines) > 0
+        for line in audit_lines:
+            parsed = json.loads(line)
+            assert "iteration" in parsed
+            assert "decision" in parsed
+
+        # Validate result.json is valid JSON
+        result_data = json.loads((run_dir / "result.json").read_text())
+        assert "run_id" in result_data
+        assert "baseline_score" in result_data
+
+        # Validate baseline.yaml is valid YAML
+        baseline_data = yaml.safe_load((run_dir / "baseline.yaml").read_text())
+        assert "score" in baseline_data
+        assert "hash" in baseline_data
+
+
+@pytest.mark.asyncio
+async def test_loop_constraint_violation_halt():
+    """Loop should halt when a HALT constraint is violated."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        target = Path(tmpdir) / "artifact.md"
+        target.write_text("Short text")
+
+        config = RunConfig(
+            mode="proposal", target_path=target, metric="test",
+            threshold=95.0, max_iterations=10,
+        )
+
+        # Add a HALT constraint that limits word count to 5 words.
+        # The modifier will add content, pushing it over the limit.
+        halt_constraint = Constraint(
+            name="strict_word_limit", description="Max 5 words",
+            validation_type="word_count",
+            parameters={"max": 5},
+            on_violation="HALT",
+        )
+
+        run_dir = Path(tmpdir) / "run"
+        audit = AuditTrail(run_dir)
+        learnings = LearningsStore(run_dir / "learnings.yaml")
+        constraints = ConstraintValidator([halt_constraint])
+        llm = MockLLM()
+        scorer = MockScorer(scores=[50.0, 55.0, 60.0, 65.0, 70.0])
+        hypothesis_gen = HypothesisGenerator(llm, "proposal", learnings)
+        modifier = ArtifactModifier(llm)
+
+        loop = AutoresearchLoop(
+            config=config, llm=llm, scorer=scorer, constraints=constraints,
+            audit=audit, learnings=learnings, hypothesis_gen=hypothesis_gen, modifier=modifier,
+        )
+
+        result = await loop.run()
+        assert result.halt_reason == "constraint_violation"

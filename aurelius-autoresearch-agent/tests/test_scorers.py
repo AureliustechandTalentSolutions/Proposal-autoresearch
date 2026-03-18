@@ -85,3 +85,37 @@ async def test_win_theme_scorer():
     text = "# Section 1\nOur innovation drives veteran success.\n# Section 2\nAnother section without themes."
     score = await scorer.score(text)
     assert 0 <= score <= 100
+
+
+@pytest.mark.asyncio
+async def test_readability_scorer_empty_string():
+    """ReadabilityScorer with empty string should not crash."""
+    from scorers.readability_scorer import ReadabilityScorer
+    scorer = ReadabilityScorer(target_min=8.0, target_max=10.0)
+    score = await scorer.score("")
+    assert 0 <= score <= 100
+
+
+@pytest.mark.asyncio
+async def test_page_utilization_scorer_zero_words():
+    """PageUtilizationScorer with 0 words should return a low score, not error."""
+    from scorers.readability_scorer import PageUtilizationScorer
+    scorer = PageUtilizationScorer(max_pages=10, words_per_page=250)
+    score = await scorer.score("")
+    assert score == 30.0  # 0% utilization -> lowest tier
+
+
+@pytest.mark.asyncio
+async def test_composite_scorer_describe():
+    """CompositeScorer.describe() should return a meaningful string."""
+    from scorers.composite_scorer import CompositeScorer
+    from scorers.readability_scorer import ReadabilityScorer, PageUtilizationScorer
+
+    scorer = CompositeScorer(scorers={
+        "readability": (ReadabilityScorer(), 0.6),
+        "page_util": (PageUtilizationScorer(max_pages=10), 0.4),
+    })
+    desc = scorer.describe()
+    assert "Composite" in desc
+    assert "readability" in desc
+    assert "page_util" in desc
