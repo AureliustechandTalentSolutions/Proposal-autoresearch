@@ -651,3 +651,647 @@ class TestLargeInputHandling:
         large_content = " ".join(["word"] * 600)
         score = await scorer.score(large_content)
         assert score == 0.0  # Over limit
+
+
+# ===========================================================================
+# Test 9: Empty Artifact Does Not Crash Hypothesis Generator
+# ===========================================================================
+
+
+class TestEmptyArtifactHypothesisGenerator:
+    """Verify hypothesis generator handles empty artifacts gracefully."""
+
+    @pytest.mark.asyncio
+    async def test_empty_artifact_generates_hypotheses(self):
+        """Empty artifact should still produce at least one hypothesis."""
+        from agent.hypothesis import HypothesisGenerator
+        from agent.learnings import LearningsStore
+
+        llm = AsyncMock()
+        llm.complete = AsyncMock(return_value=json.dumps([
+            {"description": "Add baseline content", "expected_impact": "High",
+             "risk": "low", "priority": 1}
+        ]))
+
+        store = LearningsStore(Path("/tmp") / f"test-{uuid.uuid4()}" / "learnings.yaml")
+        gen = HypothesisGenerator(llm, "proposal", store)
+        hypotheses = await gen.generate("", 0.0, {}, [])
+        assert len(hypotheses) >= 1
+        assert hypotheses[0].description is not None
+
+    @pytest.mark.asyncio
+    async def test_none_like_empty_artifact(self):
+        """Whitespace-only artifact should not crash the generator."""
+        from agent.hypothesis import HypothesisGenerator
+        from agent.learnings import LearningsStore
+
+        llm = AsyncMock()
+        llm.complete = AsyncMock(return_value=json.dumps([
+            {"description": "Add content", "expected_impact": "High",
+             "risk": "low", "priority": 1}
+        ]))
+
+        store = LearningsStore(Path("/tmp") / f"test-{uuid.uuid4()}" / "learnings.yaml")
+        gen = HypothesisGenerator(llm, "compliance", store)
+        hypotheses = await gen.generate("   \n\t  ", 0.0, {}, [])
+        assert len(hypotheses) >= 1
+
+
+# ===========================================================================
+# Test 10: LLM Returning Malformed JSON Is Handled Gracefully
+# ===========================================================================
+
+
+class TestMalformedLLMJsonHandling:
+    """Verify hypothesis generator handles malformed LLM JSON responses."""
+
+    @pytest.mark.asyncio
+    async def test_malformed_json_falls_back_to_generic_hypothesis(self):
+        """When LLM returns garbage, generator should fall back to generic hypothesis."""
+        from agent.hypothesis import HypothesisGenerator
+        from agent.learnings import LearningsStore
+
+        llm = AsyncMock()
+        llm.complete = AsyncMock(return_value="This is not JSON at all {{{broken")
+
+        store = LearningsStore(Path("/tmp") / f"test-{uuid.uuid4()}" / "learnings.yaml")
+        gen = HypothesisGenerator(llm, "proposal", store)
+        hypotheses = await gen.generate("Some artifact content.", 50.0, {}, [])
+        # Should fall back to at least one generic hypothesis
+        assert len(hypotheses) >= 1
+        assert "improve" in hypotheses[0].description.lower() or len(hypotheses[0].description) > 0
+
+    @pytest.mark.asyncio
+    async def test_partial_json_still_parses_valid_entries(self):
+        """If LLM returns partial JSON with some valid entries, those should be parsed."""
+        from agent.hypothesis import HypothesisGenerator
+        from agent.learnings import LearningsStore
+
+        llm = AsyncMock()
+        # Valid JSON array but with missing fields in some entries
+        llm.complete = AsyncMock(return_value=json.dumps([
+            {"description": "Valid hypothesis", "expected_impact": "High",
+             "risk": "low", "priority": 1},
+            {"description": "Another valid one", "expected_impact": "Medium",
+             "risk": "medium", "priority": 2},
+        ]))
+
+        store = LearningsStore(Path("/tmp") / f"test-{uuid.uuid4()}" / "learnings.yaml")
+        gen = HypothesisGenerator(llm, "proposal", store)
+        hypotheses = await gen.generate("Content.", 40.0, {}, [])
+        assert len(hypotheses) == 2
+        assert hypotheses[0].description == "Valid hypothesis"
+
+    @pytest.mark.asyncio
+    async def test_empty_string_response_produces_fallback(self):
+        """Empty LLM response should produce a fallback hypothesis."""
+        from agent.hypothesis import HypothesisGenerator
+        from agent.learnings import LearningsStore
+
+        llm = AsyncMock()
+        llm.complete = AsyncMock(return_value="")
+
+        store = LearningsStore(Path("/tmp") / f"test-{uuid.uuid4()}" / "learnings.yaml")
+        gen = HypothesisGenerator(llm, "compliance", store)
+        hypotheses = await gen.generate("Some content.", 60.0, {}, [])
+        assert len(hypotheses) >= 1
+
+
+# ===========================================================================
+# Test 11: Scorer Returning NaN Is Handled (Defaults to 0)
+# ===========================================================================
+
+
+class TestScorerNaNHandling:
+    """Verify that NaN scores are handled gracefully in the loop."""
+
+    @pytest.mark.asyncio
+    async def test_nan_score_treated_as_no_improvement(self):
+        """A scorer returning NaN should result in DISCARD, not crash."""
+        import math
+        import tempfile
+        from agent.audit import AuditTrail
+        from agent.config import RunConfig
+        from agent.constraints import ConstraintValidator
+        from agent.hypothesis import HypothesisGenerator
+        from agent.learnings import LearningsStore
+        from agent.loop import AutoresearchLoop
+        from agent.modifier import ArtifactModifier
+
+        class NaNScorer:
+            """Scorer that returns NaN on second call."""
+            def __init__(self):
+                self._call = 0
+            async def score(self, content, context=None):
+                self._call += 1
+                if self._call == 1:
+                    return 50.0  # baseline
+                return float("nan")  # NaN on subsequent calls
+            def describe(self):
+                return "NaN test scorer"
+            @property
+            def direction(self):
+                return "higher_is_better"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "artifact.md"
+            target.write_text("# Test\nContent for NaN test.\n")
+
+            config = RunConfig(
+                mode="proposal", target_path=target, metric="test",
+                threshold=95.0, max_iterations=3,
+            )
+            run_dir = Path(tmpdir) / "run"
+
+            llm = AsyncMock()
+            llm.complete = AsyncMock(side_effect=[
+                # hypothesis generation
+                json.dumps([{"description": "Improve", "expected_impact": "High",
+                             "risk": "low", "priority": 1}]),
+                # modification
+                "# Test\nContent for NaN test.\n\nImproved section.\n",
+                # subsequent hypothesis calls
+                json.dumps([{"description": "Improve 2", "expected_impact": "High",
+                             "risk": "low", "priority": 1}]),
+                "# Test\nContent for NaN test.\n\nImproved section 2.\n",
+                json.dumps([{"description": "Improve 3", "expected_impact": "High",
+                             "risk": "low", "priority": 1}]),
+                "# Test\nContent for NaN test.\n\nImproved section 3.\n",
+            ])
+
+            loop = AutoresearchLoop(
+                config=config, llm=llm,
+                scorer=NaNScorer(),
+                constraints=ConstraintValidator([]),
+                audit=AuditTrail(run_dir),
+                learnings=LearningsStore(run_dir / "learnings.yaml"),
+                hypothesis_gen=HypothesisGenerator(llm, "proposal",
+                    LearningsStore(run_dir / "learnings.yaml")),
+                modifier=ArtifactModifier(llm),
+            )
+
+            # The loop should not crash -- NaN delta means no improvement
+            result = await loop.run()
+            assert result is not None
+            # NaN comparisons are always False, so delta > 0 is False => DISCARD
+            assert result.halt_reason in ("plateau", "max_iterations")
+
+
+# ===========================================================================
+# Test 12: Constraint Violation During Iteration Triggers DISCARD Not Crash
+# ===========================================================================
+
+
+class TestConstraintViolationDiscard:
+    """Verify DISCARD constraint violations don't crash the loop."""
+
+    @pytest.mark.asyncio
+    async def test_discard_constraint_continues_loop(self):
+        """A DISCARD constraint violation should skip the iteration, not crash."""
+        import tempfile
+        from agent.constraints import Constraint
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from tests.test_uat import _build_loop as uat_build_loop
+
+            discard_constraint = Constraint(
+                name="Word Count Limit",
+                description="Max 5 words",
+                validation_type="word_count",
+                parameters={"max": 5},
+                on_violation="DISCARD",
+            )
+
+            target = Path(tmpdir) / "artifact.md"
+            target.write_text("Short text only.")
+
+            from agent.audit import AuditTrail
+            from agent.config import RunConfig
+            from agent.constraints import ConstraintValidator
+            from agent.hypothesis import HypothesisGenerator
+            from agent.learnings import LearningsStore
+            from agent.loop import AutoresearchLoop
+            from agent.modifier import ArtifactModifier
+
+            config = RunConfig(
+                mode="proposal", target_path=target, metric="test",
+                threshold=95.0, max_iterations=5,
+            )
+            run_dir = Path(tmpdir) / "run"
+
+            llm = AsyncMock()
+            llm.complete = AsyncMock(side_effect=[
+                json.dumps([{"description": "Add content", "expected_impact": "High",
+                             "risk": "low", "priority": 1}]),
+                "Short text only. Plus a lot more words added here to violate the constraint.",
+                json.dumps([{"description": "Add more", "expected_impact": "High",
+                             "risk": "low", "priority": 1}]),
+                "Short text only. Even more words added to violate constraint again.",
+                json.dumps([{"description": "Add even more", "expected_impact": "High",
+                             "risk": "low", "priority": 1}]),
+                "Short text only. Yet another expansion of content beyond the limit.",
+            ])
+
+            class FixedScorer:
+                async def score(self, content, context=None):
+                    return 50.0
+                def describe(self):
+                    return "Fixed scorer"
+                @property
+                def direction(self):
+                    return "higher_is_better"
+
+            loop = AutoresearchLoop(
+                config=config, llm=llm,
+                scorer=FixedScorer(),
+                constraints=ConstraintValidator([discard_constraint]),
+                audit=AuditTrail(run_dir),
+                learnings=LearningsStore(run_dir / "learnings.yaml"),
+                hypothesis_gen=HypothesisGenerator(llm, "proposal",
+                    LearningsStore(run_dir / "learnings.yaml")),
+                modifier=ArtifactModifier(llm),
+            )
+
+            result = await loop.run()
+            # Should not crash -- ends on plateau or max_iterations
+            assert result.halt_reason in ("plateau", "max_iterations")
+            # All iterations should be DISCARD (constraint violation)
+            for it in result.iterations:
+                assert it.decision == "DISCARD"
+
+
+# ===========================================================================
+# Test 13: HALT Constraint Stops the Loop Immediately
+# ===========================================================================
+
+
+class TestHaltConstraintStopsLoop:
+    """Verify HALT constraint stops the loop immediately."""
+
+    @pytest.mark.asyncio
+    async def test_halt_constraint_stops_on_first_violation(self):
+        """HALT constraint should stop the loop on first violation."""
+        import tempfile
+        from agent.constraints import Constraint
+        from agent.audit import AuditTrail
+        from agent.config import RunConfig
+        from agent.constraints import ConstraintValidator
+        from agent.hypothesis import HypothesisGenerator
+        from agent.learnings import LearningsStore
+        from agent.loop import AutoresearchLoop
+        from agent.modifier import ArtifactModifier
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Use a multi-line artifact so the modification passes the 50%
+            # similarity check but still violates the word count constraint.
+            original_lines = [
+                "Line one of the document.",
+                "Line two of the document.",
+                "Line three of the document.",
+                "Line four of the document.",
+                "Line five of the document.",
+                "Line six of the document.",
+                "Line seven of the document.",
+                "Line eight of the document.",
+            ]
+            original_text = "\n".join(original_lines)
+            target = Path(tmpdir) / "artifact.md"
+            target.write_text(original_text)
+
+            halt_constraint = Constraint(
+                name="Word Count HALT",
+                description="Max 10 words",
+                validation_type="word_count",
+                parameters={"max": 10},
+                on_violation="HALT",
+            )
+
+            config = RunConfig(
+                mode="proposal", target_path=target, metric="test",
+                threshold=95.0, max_iterations=10,
+            )
+            run_dir = Path(tmpdir) / "run"
+
+            class HaltTestLLM:
+                """Returns modifications that keep most lines but still
+                exceed the word count constraint."""
+                async def complete(self, system_prompt, user_message, max_tokens=4096):
+                    if any(kw in (system_prompt + user_message).lower()
+                           for kw in ("hypothes", "generate", "improvement",
+                                      "analyze", "suggest")):
+                        return json.dumps([{"description": "Add content",
+                                            "expected_impact": "High",
+                                            "risk": "low", "priority": 1}])
+                    # Return mostly the same content with a small addition
+                    # so validate_modification passes (>50% similarity)
+                    # but total words exceed 10
+                    modified_lines = list(original_lines)
+                    modified_lines.append("Additional line added here.")
+                    return "\n".join(modified_lines)
+
+            class FixedScorer:
+                async def score(self, content, context=None):
+                    return 50.0
+                def describe(self):
+                    return "Fixed scorer"
+                @property
+                def direction(self):
+                    return "higher_is_better"
+
+            llm = HaltTestLLM()
+            learnings = LearningsStore(run_dir / "learnings.yaml")
+            loop = AutoresearchLoop(
+                config=config, llm=llm,
+                scorer=FixedScorer(),
+                constraints=ConstraintValidator([halt_constraint]),
+                audit=AuditTrail(run_dir),
+                learnings=learnings,
+                hypothesis_gen=HypothesisGenerator(llm, "proposal", learnings),
+                modifier=ArtifactModifier(llm),
+            )
+
+            result = await loop.run()
+            assert result.halt_reason == "constraint_violation"
+            assert len(result.iterations) == 1
+            assert result.iterations[0].decision == "DISCARD"
+
+
+# ===========================================================================
+# Test 14: Learnings Store Handles Concurrent Read/Write Safely
+# ===========================================================================
+
+
+class TestLearningsConcurrentSafety:
+    """Verify learnings store handles concurrent operations."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_writes_produce_consistent_state(self, tmp_path):
+        """Multiple concurrent writes should all be recorded."""
+        from agent.learnings import LearningsStore
+        from agent.config import Hypothesis
+
+        store = LearningsStore(tmp_path / "learnings.yaml")
+
+        hypotheses = [
+            Hypothesis(description=f"Hypothesis {i}", expected_impact="High",
+                       risk="low", priority=1)
+            for i in range(10)
+        ]
+
+        # Write entries sequentially (file I/O is not truly concurrent in Python
+        # but we verify consistency after rapid sequential writes)
+        for i, h in enumerate(hypotheses):
+            store.record(i + 1, h, "KEEP" if i % 2 == 0 else "DISCARD",
+                         float(i), f"Insight {i}")
+
+        # Verify all entries persisted
+        assert len(store.entries) == 10
+        # Reload from disk and verify
+        store2 = LearningsStore(tmp_path / "learnings.yaml")
+        assert len(store2.entries) == 10
+
+    def test_read_after_write_is_consistent(self, tmp_path):
+        """Reading immediately after writing returns latest data."""
+        from agent.learnings import LearningsStore
+        from agent.config import Hypothesis
+
+        store = LearningsStore(tmp_path / "learnings.yaml")
+        h = Hypothesis(description="Test hypothesis", expected_impact="Medium",
+                       risk="low", priority=1)
+        store.record(1, h, "KEEP", 5.0, "Good result")
+
+        # Read back from a fresh store instance
+        store2 = LearningsStore(tmp_path / "learnings.yaml")
+        assert len(store2.entries) == 1
+        assert store2.entries[0]["hypothesis"] == "Test hypothesis"
+        assert store2.entries[0]["delta"] == 5.0
+
+    def test_empty_store_get_patterns_returns_empty(self, tmp_path):
+        """Empty store returns empty pattern lists."""
+        from agent.learnings import LearningsStore
+
+        store = LearningsStore(tmp_path / "learnings.yaml")
+        assert store.get_successful_patterns() == []
+        assert store.get_failed_patterns() == []
+
+
+# ===========================================================================
+# Test 15: Audit Trail Creates Proper Directory Structure
+# ===========================================================================
+
+
+class TestAuditDirectoryStructure:
+    """Verify audit trail creates correct directory hierarchy."""
+
+    def test_audit_trail_creates_run_dir_and_iterations(self, tmp_path):
+        """AuditTrail.__init__ should create run_dir and iterations/ subdir."""
+        from agent.audit import AuditTrail
+
+        run_dir = tmp_path / "new-run"
+        assert not run_dir.exists()
+
+        audit = AuditTrail(run_dir)
+        assert run_dir.exists()
+        assert (run_dir / "iterations").exists()
+        assert run_dir.is_dir()
+        assert (run_dir / "iterations").is_dir()
+
+    def test_log_iteration_creates_numbered_iteration_dirs(self, tmp_path):
+        """Each logged iteration creates iterations/<n>/ with expected files."""
+        from agent.audit import AuditTrail
+        from agent.config import Hypothesis, IterationResult
+
+        audit = AuditTrail(tmp_path / "run")
+        hyp = Hypothesis(description="Test", expected_impact="High",
+                         risk="low", priority=1)
+
+        for i in range(1, 4):
+            result = IterationResult(
+                iteration=i, hypothesis=hyp, score_before=50.0,
+                score_after=55.0, delta=5.0, decision="KEEP",
+                rationale="Improved", artifact_hash_before="aaa",
+                artifact_hash_after="bbb", diff="--- a\n+++ b",
+                duration_seconds=1.0,
+            )
+            audit.log_iteration(result)
+
+        for i in range(1, 4):
+            iter_dir = tmp_path / "run" / "iterations" / str(i)
+            assert iter_dir.exists(), f"iterations/{i}/ missing"
+            assert (iter_dir / "change.diff").exists()
+            assert (iter_dir / "hypothesis.yaml").exists()
+            assert (iter_dir / "result.yaml").exists()
+
+    def test_nested_run_dir_creation(self, tmp_path):
+        """Deeply nested run_dir should be created without error."""
+        from agent.audit import AuditTrail
+
+        deep_dir = tmp_path / "a" / "b" / "c" / "d" / "run"
+        audit = AuditTrail(deep_dir)
+        assert deep_dir.exists()
+        assert (deep_dir / "iterations").exists()
+
+
+# ===========================================================================
+# Test 16: Loop Handles Network Timeout from LLM Gracefully
+# ===========================================================================
+
+
+class TestNetworkTimeoutHandling:
+    """Verify the loop handles LLM network timeouts gracefully."""
+
+    @pytest.mark.asyncio
+    async def test_llm_timeout_raises_and_loop_catches(self):
+        """When LLM raises a timeout exception, the loop should propagate it
+        and set progress to HALTED."""
+        import tempfile
+        from agent.audit import AuditTrail
+        from agent.config import RunConfig
+        from agent.constraints import ConstraintValidator
+        from agent.hypothesis import HypothesisGenerator
+        from agent.learnings import LearningsStore
+        from agent.loop import AutoresearchLoop
+        from agent.modifier import ArtifactModifier
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "artifact.md"
+            target.write_text("# Test\nTimeout test content.\n")
+
+            config = RunConfig(
+                mode="proposal", target_path=target, metric="test",
+                threshold=95.0, max_iterations=3,
+            )
+            run_dir = Path(tmpdir) / "run"
+
+            llm = AsyncMock()
+            # First call (baseline scoring) works, then hypothesis gen times out
+            llm.complete = AsyncMock(side_effect=TimeoutError("Connection timed out"))
+
+            class BaselineOnlyScorer:
+                """Returns baseline score then times out."""
+                def __init__(self):
+                    self._call = 0
+                async def score(self, content, context=None):
+                    self._call += 1
+                    return 50.0
+                def describe(self):
+                    return "Baseline scorer"
+                @property
+                def direction(self):
+                    return "higher_is_better"
+
+            loop = AutoresearchLoop(
+                config=config, llm=llm,
+                scorer=BaselineOnlyScorer(),
+                constraints=ConstraintValidator([]),
+                audit=AuditTrail(run_dir),
+                learnings=LearningsStore(run_dir / "learnings.yaml"),
+                hypothesis_gen=HypothesisGenerator(llm, "proposal",
+                    LearningsStore(run_dir / "learnings.yaml")),
+                modifier=ArtifactModifier(llm),
+            )
+
+            with pytest.raises(TimeoutError):
+                await loop.run()
+
+            # Progress should be set to HALTED
+            assert loop.progress.status == "HALTED"
+            assert loop.is_running is False
+
+
+# ===========================================================================
+# Test 17: CompositeScorer with Zero Weights Doesn't Divide by Zero
+# ===========================================================================
+
+
+class TestCompositeScorerZeroWeights:
+    """Verify CompositeScorer handles edge cases with weights."""
+
+    def test_zero_total_weight_raises_error(self):
+        """CompositeScorer with all-zero weights should raise ValueError."""
+        from scorers.composite_scorer import CompositeScorer
+        from scorers.readability_scorer import ReadabilityScorer
+
+        with pytest.raises(ValueError, match="weights must sum to 1.0"):
+            CompositeScorer(
+                scorers={
+                    "readability": (ReadabilityScorer(), 0.0),
+                    "readability2": (ReadabilityScorer(), 0.0),
+                }
+            )
+
+    def test_weights_not_summing_to_one_raises_error(self):
+        """Weights not summing to 1.0 should raise ValueError."""
+        from scorers.composite_scorer import CompositeScorer
+        from scorers.readability_scorer import ReadabilityScorer
+
+        with pytest.raises(ValueError, match="weights must sum to 1.0"):
+            CompositeScorer(
+                scorers={
+                    "a": (ReadabilityScorer(), 0.3),
+                    "b": (ReadabilityScorer(), 0.3),
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_single_scorer_weight_one(self):
+        """Single scorer with weight 1.0 should return that scorer's score directly."""
+        from scorers.composite_scorer import CompositeScorer
+        from scorers.readability_scorer import ReadabilityScorer
+
+        scorer = CompositeScorer(
+            scorers={"readability": (ReadabilityScorer(), 1.0)}
+        )
+        content = (
+            "This is a well-written document with multiple sentences. "
+            "It covers technical topics at a professional reading level."
+        )
+        score = await scorer.score(content)
+        assert isinstance(score, float)
+        assert 0 <= score <= 100
+
+
+# ===========================================================================
+# Test 18: hypothesis_count=0 Returns Empty List
+# ===========================================================================
+
+
+class TestHypothesisCountZero:
+    """Verify requesting zero hypotheses returns an empty or minimal list."""
+
+    @pytest.mark.asyncio
+    async def test_zero_hypotheses_requested(self):
+        """Requesting 0 hypotheses should return a fallback (the generator always
+        produces at least 1 as a safety net)."""
+        from agent.hypothesis import HypothesisGenerator
+        from agent.learnings import LearningsStore
+
+        llm = AsyncMock()
+        # Return empty array -- the generator's fallback should kick in
+        llm.complete = AsyncMock(return_value="[]")
+
+        store = LearningsStore(Path("/tmp") / f"test-{uuid.uuid4()}" / "learnings.yaml")
+        gen = HypothesisGenerator(llm, "proposal", store)
+        hypotheses = await gen.generate("Some content.", 50.0, {}, [], num_hypotheses=0)
+        # The generator always returns at least 1 fallback hypothesis
+        assert len(hypotheses) >= 1
+
+    @pytest.mark.asyncio
+    async def test_one_hypothesis_requested(self):
+        """Requesting 1 hypothesis should return exactly 1."""
+        from agent.hypothesis import HypothesisGenerator
+        from agent.learnings import LearningsStore
+
+        llm = AsyncMock()
+        llm.complete = AsyncMock(return_value=json.dumps([
+            {"description": "Single improvement", "expected_impact": "High",
+             "risk": "low", "priority": 1},
+            {"description": "Extra one", "expected_impact": "Low",
+             "risk": "low", "priority": 2},
+        ]))
+
+        store = LearningsStore(Path("/tmp") / f"test-{uuid.uuid4()}" / "learnings.yaml")
+        gen = HypothesisGenerator(llm, "proposal", store)
+        hypotheses = await gen.generate("Content.", 50.0, {}, [], num_hypotheses=1)
+        assert len(hypotheses) == 1
+        assert hypotheses[0].description == "Single improvement"

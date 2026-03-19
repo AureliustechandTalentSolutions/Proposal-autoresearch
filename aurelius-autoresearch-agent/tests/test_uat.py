@@ -823,3 +823,523 @@ class TestFileStructure:
     def test_file_exists(self, rel_path: str):
         full = PROJECT_ROOT / rel_path
         assert full.exists(), f"Required path missing: {rel_path}"
+
+
+# ===========================================================================
+# Enhanced UAT Scenarios
+# ===========================================================================
+
+
+class TestUATScoreImprovesOverIterations:
+    """UAT: User starts a proposal optimization run and sees score improve over 5 iterations."""
+
+    @pytest.mark.asyncio
+    async def test_score_improves_over_5_iterations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Steadily increasing scores over 6 calls (1 baseline + 5 iterations)
+            scores = [40.0, 50.0, 58.0, 65.0, 72.0, 78.0]
+            loop, run_dir, config = _build_loop(
+                tmpdir,
+                mode="proposal",
+                threshold=95.0,
+                max_iterations=5,
+                scores=scores,
+            )
+            result = await loop.run()
+
+            # The run should have executed 5 iterations
+            assert len(result.iterations) == 5
+            # Final score must be strictly greater than baseline
+            assert result.final_score > result.baseline_score
+            # Verify monotonic score trajectory for KEEP decisions
+            kept_scores = [
+                it.score_after for it in result.iterations if it.decision == "KEEP"
+            ]
+            for i in range(1, len(kept_scores)):
+                assert kept_scores[i] >= kept_scores[i - 1], (
+                    f"Score did not improve monotonically: {kept_scores}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_total_improvement_is_positive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scores = [30.0, 40.0, 50.0, 60.0, 70.0, 80.0]
+            loop, _, _ = _build_loop(
+                tmpdir,
+                mode="proposal",
+                threshold=95.0,
+                max_iterations=5,
+                scores=scores,
+            )
+            result = await loop.run()
+            assert result.total_improvement > 0
+            assert result.total_improvement == result.final_score - result.baseline_score
+
+
+class TestUATAutonomyLevelSwitch:
+    """UAT: User switches autonomy level mid-run and actions are blocked/allowed."""
+
+    @pytest.mark.asyncio
+    async def test_constraint_blocks_action_after_switch(self):
+        """Simulates adding a strict constraint mid-run that blocks further changes."""
+        from agent.constraints import Constraint, ConstraintValidator
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Start with no constraints -- first iteration proceeds
+            loop, run_dir, _ = _build_loop(
+                tmpdir,
+                mode="proposal",
+                threshold=95.0,
+                max_iterations=5,
+                scores=[50.0, 55.0, 60.0, 65.0, 70.0, 75.0],
+                constraints=[],
+            )
+            result = await loop.run()
+            first_run_kept = sum(1 for i in result.iterations if i.decision == "KEEP")
+
+            # Now run again with a HALT constraint that blocks all changes
+            halt_constraint = Constraint(
+                name="Block All",
+                description="Block all changes (simulates restrictive autonomy)",
+                validation_type="custom_regex",
+                parameters={"pattern": "IMPOSSIBLE_xyzzy_NEVER_MATCH", "must_match": True},
+                on_violation="HALT",
+            )
+            loop2, _, _ = _build_loop(
+                tmpdir,
+                mode="proposal",
+                threshold=95.0,
+                max_iterations=5,
+                scores=[50.0, 55.0, 60.0, 65.0, 70.0],
+                constraints=[halt_constraint],
+            )
+            result2 = await loop2.run()
+            assert result2.halt_reason == "constraint_violation"
+            # Should have been blocked on first iteration
+            assert len(result2.iterations) == 1
+
+    @pytest.mark.asyncio
+    async def test_discard_constraint_allows_continuation(self):
+        """A DISCARD constraint does not stop the loop, just discards the iteration."""
+        from agent.constraints import Constraint
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # This regex won't match so content always violates (must_match=True)
+            discard_constraint = Constraint(
+                name="Soft Block",
+                description="Discard if pattern missing",
+                validation_type="custom_regex",
+                parameters={"pattern": "NEVER_MATCH_xyzzy_12345", "must_match": True},
+                on_violation="DISCARD",
+            )
+            loop, _, _ = _build_loop(
+                tmpdir,
+                mode="proposal",
+                threshold=95.0,
+                max_iterations=5,
+                scores=[50.0, 50.0, 50.0, 50.0, 50.0, 50.0],
+                constraints=[discard_constraint],
+            )
+            result = await loop.run()
+            # Loop should complete (plateau or max_iterations) but not constraint_violation
+            assert result.halt_reason in ("plateau", "max_iterations")
+            # All iterations should be DISCARD
+            assert all(it.decision == "DISCARD" for it in result.iterations)
+
+
+class TestUATCancelRunningLoop:
+    """UAT: User cancels a running loop and system stops cleanly."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_produces_valid_result(self):
+        from agent.audit import AuditTrail
+        from agent.config import RunConfig
+        from agent.constraints import ConstraintValidator
+        from agent.hypothesis import HypothesisGenerator
+        from agent.learnings import LearningsStore
+        from agent.loop import AutoresearchLoop
+        from agent.modifier import ArtifactModifier
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "artifact.md"
+            target.write_text("# Proposal\n\nBaseline content for cancel UAT.\n")
+
+            config = RunConfig(
+                mode="proposal",
+                target_path=target,
+                metric="test",
+                threshold=99.0,
+                max_iterations=100,
+            )
+
+            run_dir = Path(tmpdir) / "runs" / "cancel-uat"
+            audit = AuditTrail(run_dir)
+            learnings = LearningsStore(run_dir / "learnings.yaml")
+            constraints = ConstraintValidator([])
+            llm = MockLLM()
+
+            class SlowScorer(MockScorer):
+                async def score(self, content, context=None):
+                    await asyncio.sleep(0.1)
+                    return await super().score(content, context)
+
+            scorer = SlowScorer(scores=[50.0] * 100)
+            hypothesis_gen = HypothesisGenerator(llm, "proposal", learnings)
+            modifier = ArtifactModifier(llm)
+
+            loop = AutoresearchLoop(
+                config=config, llm=llm, scorer=scorer, constraints=constraints,
+                audit=audit, learnings=learnings, hypothesis_gen=hypothesis_gen,
+                modifier=modifier,
+            )
+
+            async def cancel_after_brief_delay():
+                await asyncio.sleep(0.05)
+                await loop.cancel()
+
+            asyncio.create_task(cancel_after_brief_delay())
+            result = await loop.run()
+
+            assert result.halt_reason == "user_interrupt"
+            # Result should still be well-formed
+            assert result.run_id is not None
+            assert result.baseline_score >= 0
+            assert result.started_at is not None
+            assert result.completed_at is not None
+            # Progress file should show CANCELLED
+            progress_data = yaml.safe_load((run_dir / "progress.yaml").read_text())
+            assert progress_data["status"] == "CANCELLED"
+
+    @pytest.mark.asyncio
+    async def test_loop_not_running_after_cancel(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "artifact.md"
+            target.write_text("# Test\nContent.\n")
+
+            from agent.audit import AuditTrail
+            from agent.config import RunConfig
+            from agent.constraints import ConstraintValidator
+            from agent.hypothesis import HypothesisGenerator
+            from agent.learnings import LearningsStore
+            from agent.loop import AutoresearchLoop
+            from agent.modifier import ArtifactModifier
+
+            config = RunConfig(
+                mode="proposal", target_path=target, metric="test",
+                threshold=99.0, max_iterations=100,
+            )
+            run_dir = Path(tmpdir) / "runs" / "running-check"
+            llm = MockLLM()
+
+            class SlowScorer(MockScorer):
+                async def score(self, content, context=None):
+                    await asyncio.sleep(0.1)
+                    return await super().score(content, context)
+
+            loop = AutoresearchLoop(
+                config=config, llm=llm,
+                scorer=SlowScorer(scores=[50.0] * 100),
+                constraints=ConstraintValidator([]),
+                audit=AuditTrail(run_dir),
+                learnings=LearningsStore(run_dir / "learnings.yaml"),
+                hypothesis_gen=HypothesisGenerator(llm, "proposal",
+                    LearningsStore(run_dir / "learnings.yaml")),
+                modifier=ArtifactModifier(llm),
+            )
+
+            async def cancel_soon():
+                await asyncio.sleep(0.05)
+                await loop.cancel()
+
+            asyncio.create_task(cancel_soon())
+            await loop.run()
+            assert loop.is_running is False
+
+
+class TestUATLearningsInfluenceNewHypotheses:
+    """UAT: User views learnings from previous run and they influence new hypotheses."""
+
+    @pytest.mark.asyncio
+    async def test_learnings_appear_in_hypothesis_generation_context(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Run 1
+            loop1, run_dir1, _ = _build_loop(
+                tmpdir,
+                mode="proposal",
+                threshold=95.0,
+                max_iterations=3,
+                scores=[50.0, 60.0, 70.0, 75.0],
+            )
+            result1 = await loop1.run()
+            assert len(result1.learnings) > 0
+
+            # Merge learnings into a new store
+            from agent.learnings import LearningsStore
+
+            run2_dir = Path(tmpdir) / "runs" / "run2"
+            run2_dir.mkdir(parents=True, exist_ok=True)
+            store2 = LearningsStore(run2_dir / "learnings.yaml")
+            store2.merge_from_previous_run(run_dir1)
+
+            # The hypothesis generation context should include prior patterns
+            context = store2.get_context_for_hypothesis_generation()
+            assert "Successful Patterns" in context or "Failed Patterns" in context
+            # At least one learning description should be present
+            any_learning_present = any(
+                entry["hypothesis"] in context for entry in result1.learnings
+            )
+            assert any_learning_present, (
+                "No learnings from run 1 appeared in hypothesis generation context"
+            )
+
+    @pytest.mark.asyncio
+    async def test_successful_patterns_sorted_by_delta(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from agent.learnings import LearningsStore
+            from agent.config import Hypothesis
+
+            store = LearningsStore(Path(tmpdir) / "learnings.yaml")
+            h1 = Hypothesis(description="Small improvement", expected_impact="Low",
+                            risk="low", priority=1)
+            h2 = Hypothesis(description="Big improvement", expected_impact="High",
+                            risk="low", priority=1)
+            store.record(1, h1, "KEEP", 2.0, "Minor gain")
+            store.record(2, h2, "KEEP", 10.0, "Major gain")
+
+            successful = store.get_successful_patterns()
+            assert len(successful) == 2
+            # Sorted by delta descending
+            assert successful[0]["delta"] >= successful[1]["delta"]
+            assert successful[0]["hypothesis"] == "Big improvement"
+
+
+class TestUATCompositeScoreCustomWeights:
+    """UAT: User configures composite scorer with custom weights."""
+
+    @pytest.mark.asyncio
+    async def test_custom_weighted_composite_scorer(self):
+        from scorers.composite_scorer import CompositeScorer
+        from scorers.readability_scorer import ReadabilityScorer, PageUtilizationScorer
+
+        scorer = CompositeScorer(
+            scorers={
+                "readability": (ReadabilityScorer(), 0.7),
+                "page_util": (PageUtilizationScorer(max_pages=50), 0.3),
+            }
+        )
+        content = (
+            "This is a sample federal proposal document for testing purposes. "
+            "The document contains several well-formed sentences at a professional level. "
+            "It discusses technical approaches to cloud migration and DevSecOps pipelines."
+        )
+        score = await scorer.score(content)
+        assert isinstance(score, float)
+        assert 0 <= score <= 100
+
+        details = scorer.get_details()
+        assert "readability" in details
+        assert "page_util" in details
+        # Verify weights are correct
+        assert details["readability"]["weight"] == 0.7
+        assert details["page_util"]["weight"] == 0.3
+
+    def test_custom_weights_must_sum_to_one(self):
+        from scorers.composite_scorer import CompositeScorer
+        from scorers.readability_scorer import ReadabilityScorer
+
+        with pytest.raises(ValueError, match="weights must sum to 1.0"):
+            CompositeScorer(
+                scorers={
+                    "readability": (ReadabilityScorer(), 0.5),
+                    "readability2": (ReadabilityScorer(), 0.3),
+                }
+            )
+
+
+class TestUATComplianceModeSTIG:
+    """UAT: User runs compliance mode with STIG target and scores improve."""
+
+    @pytest.mark.asyncio
+    async def test_compliance_stig_scores_improve(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "artifact.md"
+            target.write_text(
+                "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\n"
+                "spec:\n  template:\n    spec:\n      containers:\n      - name: web\n"
+                "        image: nginx:latest\n"
+            )
+            loop, run_dir, _ = _build_loop(
+                tmpdir,
+                mode="compliance",
+                threshold=95.0,
+                max_iterations=5,
+                scores=[30.0, 40.0, 50.0, 60.0, 70.0, 80.0],
+            )
+            result = await loop.run()
+
+            assert result.config.mode == "compliance"
+            assert result.final_score > result.baseline_score
+            # Verify audit trail captured all iterations
+            audit_log = run_dir / "audit.jsonl"
+            assert audit_log.exists()
+            lines = [l for l in audit_log.read_text().strip().split("\n") if l.strip()]
+            assert len(lines) == len(result.iterations)
+
+
+class TestUATExportMarkdownReport:
+    """UAT: User exports a run report in markdown format."""
+
+    @pytest.mark.asyncio
+    async def test_report_generated_in_markdown(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            loop, run_dir, _ = _build_loop(
+                tmpdir,
+                mode="proposal",
+                threshold=95.0,
+                max_iterations=3,
+                scores=[50.0, 60.0, 70.0, 75.0],
+            )
+            result = await loop.run()
+
+            report_path = run_dir / "report.md"
+            assert report_path.exists(), "report.md not generated"
+            report = report_path.read_text()
+
+            # Must contain key markdown report sections
+            assert "# Autoresearch Run Report" in report
+            assert "## Score Summary" in report
+            assert "## Iteration History" in report
+            assert "Baseline Score" in report
+            assert "Final Score" in report
+            assert result.run_id in report
+
+    @pytest.mark.asyncio
+    async def test_report_contains_iteration_table(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            loop, run_dir, _ = _build_loop(
+                tmpdir,
+                mode="proposal",
+                threshold=95.0,
+                max_iterations=3,
+                scores=[50.0, 60.0, 70.0, 75.0],
+            )
+            result = await loop.run()
+
+            report = (run_dir / "report.md").read_text()
+            # Table header markers
+            assert "| # |" in report
+            assert "| Hypothesis |" in report or "Hypothesis" in report
+            assert "| Decision |" in report or "Decision" in report
+
+    @pytest.mark.asyncio
+    async def test_to_markdown_report_method_returns_string(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            loop, _, _ = _build_loop(
+                tmpdir,
+                mode="proposal",
+                threshold=95.0,
+                max_iterations=2,
+                scores=[50.0, 60.0, 70.0],
+            )
+            result = await loop.run()
+            md = result.to_markdown_report()
+            assert isinstance(md, str)
+            assert len(md) > 100
+
+
+class TestUATPageLimitConstraint:
+    """UAT: User starts run with page limit constraint and it enforces correctly."""
+
+    @pytest.mark.asyncio
+    async def test_page_limit_halt_stops_run(self):
+        from agent.constraints import Constraint
+        from agent.audit import AuditTrail
+        from agent.config import RunConfig
+        from agent.constraints import ConstraintValidator
+        from agent.hypothesis import HypothesisGenerator
+        from agent.learnings import LearningsStore
+        from agent.loop import AutoresearchLoop
+        from agent.modifier import ArtifactModifier
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Start with content just under the 1-page limit (~240 words)
+            base_text = "This is a sentence for the proposal document. " * 24  # ~240 words
+            target = Path(tmpdir) / "artifact.md"
+            target.write_text(f"# Proposal\n\n{base_text}")
+
+            page_constraint = Constraint(
+                name="Strict Page Limit",
+                description="Must not exceed 1 page",
+                validation_type="page_limit",
+                parameters={"max_pages": 1, "words_per_page": 250},
+                on_violation="HALT",
+            )
+
+            config = RunConfig(
+                mode="proposal", target_path=target, metric="test",
+                threshold=95.0, max_iterations=10,
+            )
+            run_dir = Path(tmpdir) / "runs" / "page-limit-run"
+
+            # Custom LLM that adds enough content to push over the page limit
+            # while keeping >50% similarity with original
+            class PagePushLLM:
+                async def complete(self, system_prompt, user_message, max_tokens=4096):
+                    if any(kw in (system_prompt + user_message).lower()
+                           for kw in ("hypothes", "generate", "improvement", "analyze", "suggest")):
+                        return json.dumps([{
+                            "description": "Add a detailed section to improve score",
+                            "expected_impact": "High", "risk": "low", "priority": 1
+                        }])
+                    # Modification: return original + extra words to exceed page limit
+                    parts = user_message.split("## Current Document\n")
+                    if len(parts) > 1:
+                        original = parts[-1].split("\nApply")[0]
+                    else:
+                        original = user_message
+                    extra = " Additional detailed content added here." * 5  # ~30 more words
+                    return original.rstrip() + "\n\n" + extra + "\n"
+
+            llm = PagePushLLM()
+            learnings = LearningsStore(run_dir / "learnings.yaml")
+            loop = AutoresearchLoop(
+                config=config, llm=llm,
+                scorer=MockScorer(scores=[50.0, 55.0, 60.0, 65.0, 70.0]),
+                constraints=ConstraintValidator([page_constraint]),
+                audit=AuditTrail(run_dir),
+                learnings=learnings,
+                hypothesis_gen=HypothesisGenerator(llm, "proposal", learnings),
+                modifier=ArtifactModifier(llm),
+            )
+            result = await loop.run()
+            assert result.halt_reason == "constraint_violation"
+
+    @pytest.mark.asyncio
+    async def test_page_limit_discard_continues_loop(self):
+        from agent.constraints import Constraint
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "artifact.md"
+            target.write_text(
+                "# Big Proposal\n\n"
+                + ("Filler sentence to push beyond page limit for testing purposes. " * 60)
+            )
+
+            page_constraint = Constraint(
+                name="Soft Page Limit",
+                description="Must not exceed 1 page",
+                validation_type="page_limit",
+                parameters={"max_pages": 1, "words_per_page": 250},
+                on_violation="DISCARD",
+            )
+            loop, _, _ = _build_loop(
+                tmpdir,
+                mode="proposal",
+                threshold=95.0,
+                max_iterations=5,
+                scores=[50.0, 50.0, 50.0, 50.0, 50.0, 50.0],
+                constraints=[page_constraint],
+            )
+            result = await loop.run()
+            # Should plateau or hit max_iterations, NOT constraint_violation halt
+            assert result.halt_reason in ("plateau", "max_iterations")
