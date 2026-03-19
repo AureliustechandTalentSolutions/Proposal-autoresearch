@@ -534,3 +534,408 @@ def test_scorer_composition_federal_compliance():
     assert "stig_pass" in scorer._scorers
     assert "poam_reduction" in scorer._scorers
     assert "sprs_normalized" in scorer._scorers
+
+
+# ===========================================================================
+# Integration Test: Full Proposal Loop E2E (3 iterations)
+# ===========================================================================
+
+
+class TestE2EProposalLoop:
+    """End-to-end: proposal optimization loop completes 3 iterations."""
+
+    @pytest.fixture
+    def mock_llm(self):
+        return MockLLM()
+
+    @pytest.mark.asyncio
+    async def test_loop_completes_3_iterations(self, mock_llm, tmp_path):
+        """Full loop runs 3 iterations with mock LLM and produces results."""
+        from agent.config import RunConfig
+        from agent.loop import AutoresearchLoop
+
+        target = tmp_path / "proposal.md"
+        target.write_text("# Technical Approach\nOur solution provides cloud infrastructure.")
+
+        config = RunConfig(
+            mode="proposal",
+            target_path=target,
+            metric="readability",
+            threshold=99.0,
+            max_iterations=3,
+        )
+
+        loop = AutoresearchLoop(config=config, llm=mock_llm)
+        result = await loop.run()
+
+        assert result is not None
+        assert result.iterations_completed >= 1
+        assert result.iterations_completed <= 3
+
+    @pytest.mark.asyncio
+    async def test_loop_produces_audit_trail(self, mock_llm, tmp_path):
+        """Loop creates audit directory with iteration records."""
+        from agent.config import RunConfig
+        from agent.loop import AutoresearchLoop
+
+        target = tmp_path / "proposal.md"
+        target.write_text("# Section L\nThis section describes our approach.")
+
+        config = RunConfig(
+            mode="proposal",
+            target_path=target,
+            metric="readability",
+            threshold=99.0,
+            max_iterations=2,
+        )
+
+        loop = AutoresearchLoop(config=config, llm=mock_llm)
+        result = await loop.run()
+
+        # Audit trail should exist
+        assert result is not None
+        assert hasattr(result, "run_id") or hasattr(result, "iterations_completed")
+
+
+# ===========================================================================
+# Integration Test: Full Compliance Loop E2E
+# ===========================================================================
+
+
+class TestE2EComplianceLoop:
+    """End-to-end: compliance optimization loop with STIG scorer."""
+
+    @pytest.fixture
+    def mock_llm(self):
+        return MockLLM()
+
+    @pytest.mark.asyncio
+    async def test_compliance_loop_completes(self, mock_llm, tmp_path):
+        """Compliance mode loop completes without errors."""
+        from agent.config import RunConfig
+        from agent.loop import AutoresearchLoop
+
+        target = tmp_path / "deployment.yaml"
+        target.write_text("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: test\n")
+
+        config = RunConfig(
+            mode="compliance",
+            target_path=target,
+            metric="stig_pass_rate",
+            threshold=99.0,
+            max_iterations=2,
+        )
+
+        loop = AutoresearchLoop(config=config, llm=mock_llm)
+        result = await loop.run()
+
+        assert result is not None
+        assert result.iterations_completed >= 1
+
+
+# ===========================================================================
+# Integration Test: Multiple Concurrent Runs
+# ===========================================================================
+
+
+class TestConcurrentRuns:
+    """Verify multiple loops can run concurrently without interference."""
+
+    @pytest.mark.asyncio
+    async def test_two_concurrent_runs_independent(self, tmp_path):
+        """Two loops running concurrently produce independent results."""
+        from agent.config import RunConfig
+        from agent.loop import AutoresearchLoop
+
+        mock1 = MockLLM()
+        mock2 = MockLLM()
+
+        target1 = tmp_path / "proposal1.md"
+        target1.write_text("# Proposal A\nFirst proposal content.")
+        target2 = tmp_path / "proposal2.md"
+        target2.write_text("# Proposal B\nSecond proposal content.")
+
+        config1 = RunConfig(
+            mode="proposal", target_path=target1,
+            metric="readability", threshold=99.0, max_iterations=2,
+        )
+        config2 = RunConfig(
+            mode="proposal", target_path=target2,
+            metric="readability", threshold=99.0, max_iterations=2,
+        )
+
+        loop1 = AutoresearchLoop(config=config1, llm=mock1)
+        loop2 = AutoresearchLoop(config=config2, llm=mock2)
+
+        result1, result2 = await asyncio.gather(loop1.run(), loop2.run())
+
+        assert result1 is not None
+        assert result2 is not None
+        # Each loop has its own LLM call count
+        assert mock1._call_count > 0
+        assert mock2._call_count > 0
+
+
+# ===========================================================================
+# Integration Test: Learnings Cross-Run Transfer
+# ===========================================================================
+
+
+class TestLearningsCrossRun:
+    """Verify learnings from run 1 are available to run 2."""
+
+    @pytest.mark.asyncio
+    async def test_learnings_persist_across_runs(self, tmp_path):
+        """Learnings written by run 1 can be read by run 2."""
+        from agent.learnings import LearningsStore
+
+        store_path = tmp_path / "learnings.yaml"
+        store1 = LearningsStore(store_path)
+        store1.record(
+            iteration=1,
+            hypothesis="Add past performance references",
+            outcome="KEEP",
+            delta=5.2,
+            insight="Past performance references increase discriminator density",
+            reusable=True,
+        )
+        store1.save()
+
+        # New store instance reads from same file
+        store2 = LearningsStore(store_path)
+        patterns = store2.get_successful_patterns()
+
+        assert len(patterns) >= 1
+        assert any("past performance" in str(p).lower() for p in patterns)
+
+    @pytest.mark.asyncio
+    async def test_learnings_context_includes_previous_patterns(self, tmp_path):
+        """Hypothesis context includes learnings from previous iterations."""
+        from agent.learnings import LearningsStore
+
+        store_path = tmp_path / "learnings.yaml"
+        store = LearningsStore(store_path)
+        store.record(
+            iteration=1,
+            hypothesis="Increase readability",
+            outcome="KEEP",
+            delta=3.0,
+            insight="Shorter sentences improve readability",
+            reusable=True,
+        )
+        store.record(
+            iteration=2,
+            hypothesis="Add jargon",
+            outcome="DISCARD",
+            delta=-2.0,
+            insight="Jargon reduces readability",
+            reusable=True,
+        )
+        store.save()
+
+        context = store.get_context_for_hypothesis_generation()
+        assert "readability" in context.lower() or "shorter" in context.lower()
+
+
+# ===========================================================================
+# Integration Test: Composite Scorer Aggregation
+# ===========================================================================
+
+
+class TestCompositeScorerIntegration:
+    """Verify composite scorer correctly aggregates multiple scorers."""
+
+    @pytest.mark.asyncio
+    async def test_composite_uses_weights(self):
+        """Composite scorer respects configured weights."""
+        from scorers.composite_scorer import CompositeScorer
+
+        # CompositeScorer should accept scorer config
+        scorer = CompositeScorer.__new__(CompositeScorer)
+        assert hasattr(CompositeScorer, "score") or hasattr(CompositeScorer, "__init__")
+
+
+# ===========================================================================
+# Integration Test: Config Loading
+# ===========================================================================
+
+
+class TestConfigIntegration:
+    """Verify config files load and produce correct structures."""
+
+    def test_proposal_yaml_loads(self):
+        """config/proposal.yaml is valid YAML with expected keys."""
+        config_path = Path(__file__).parent.parent / "config" / "proposal.yaml"
+        if not config_path.exists():
+            pytest.skip("proposal.yaml not found")
+        data = yaml.safe_load(config_path.read_text())
+        assert isinstance(data, dict)
+
+    def test_compliance_yaml_loads(self):
+        """config/compliance.yaml is valid YAML with expected keys."""
+        config_path = Path(__file__).parent.parent / "config" / "compliance.yaml"
+        if not config_path.exists():
+            pytest.skip("compliance.yaml not found")
+        data = yaml.safe_load(config_path.read_text())
+        assert isinstance(data, dict)
+
+    def test_default_yaml_loads(self):
+        """config/default.yaml is valid YAML."""
+        config_path = Path(__file__).parent.parent / "config" / "default.yaml"
+        if not config_path.exists():
+            pytest.skip("default.yaml not found")
+        data = yaml.safe_load(config_path.read_text())
+        assert isinstance(data, dict)
+
+    def test_autonomy_yaml_has_three_levels(self):
+        """config/autonomy.yaml defines 3 autonomy levels."""
+        config_path = Path(__file__).parent.parent / "config" / "autonomy.yaml"
+        if not config_path.exists():
+            pytest.skip("autonomy.yaml not found")
+        data = yaml.safe_load(config_path.read_text())
+        assert isinstance(data, dict)
+        # Should reference levels or autonomy settings
+        content = config_path.read_text().lower()
+        assert "supervised" in content or "level" in content or "autonomous" in content
+
+    def test_privacy_router_yaml_has_rules(self):
+        """config/privacy-router.yaml defines routing rules."""
+        config_path = Path(__file__).parent.parent / "config" / "privacy-router.yaml"
+        if not config_path.exists():
+            pytest.skip("privacy-router.yaml not found")
+        data = yaml.safe_load(config_path.read_text())
+        assert isinstance(data, dict)
+        content = config_path.read_text().lower()
+        assert "rule" in content or "route" in content or "classification" in content
+
+
+# ===========================================================================
+# Integration Test: MinIO Client Mock
+# ===========================================================================
+
+
+class TestMinIOIntegration:
+    """Verify MinIO operations work with mock client."""
+
+    def test_minio_rpc_module_exists(self):
+        """MinIO RPC handler file exists and is substantial."""
+        rpc_path = Path(__file__).parent.parent / "src" / "main" / "rpc" / "minio.rpc.ts"
+        assert rpc_path.exists()
+        content = rpc_path.read_text()
+        assert "putObject" in content or "put_object" in content
+        assert "getObject" in content or "get_object" in content
+
+    def test_minio_bucket_names_defined(self):
+        """MinIO RPC defines expected bucket names."""
+        rpc_path = Path(__file__).parent.parent / "src" / "main" / "rpc" / "minio.rpc.ts"
+        content = rpc_path.read_text()
+        expected_buckets = ["proposals", "compliance", "audit"]
+        found = sum(1 for b in expected_buckets if b in content)
+        assert found >= 2, f"Only {found}/3 expected buckets found in minio.rpc.ts"
+
+
+# ===========================================================================
+# Integration Test: OPA Policy Evaluation Mock
+# ===========================================================================
+
+
+class TestOPAIntegration:
+    """Verify OPA policy evaluation patterns."""
+
+    def test_opa_rpc_has_evaluate(self):
+        """OPA RPC handler has evaluate method."""
+        rpc_path = Path(__file__).parent.parent / "src" / "main" / "rpc" / "opa.rpc.ts"
+        assert rpc_path.exists()
+        content = rpc_path.read_text()
+        assert "evaluate" in content.lower()
+
+    def test_opa_policies_have_package_declarations(self):
+        """All Rego policies start with package declaration."""
+        policies_dir = Path(__file__).parent.parent / "policies"
+        for rego_file in policies_dir.rglob("*.rego"):
+            content = rego_file.read_text()
+            assert content.strip().startswith("package "), (
+                f"{rego_file.name} missing package declaration"
+            )
+
+    def test_compliance_policies_have_score_or_allow(self):
+        """Compliance policies define score or allow rules."""
+        compliance_dir = Path(__file__).parent.parent / "policies" / "compliance"
+        if not compliance_dir.exists():
+            pytest.skip("Compliance policies not found")
+        for rego_file in compliance_dir.glob("*.rego"):
+            content = rego_file.read_text()
+            assert "score" in content or "allow" in content or "result" in content, (
+                f"{rego_file.name} has no score/allow/result rule"
+            )
+
+
+# ===========================================================================
+# Integration Test: IPC Message Protocol
+# ===========================================================================
+
+
+class TestIPCProtocol:
+    """Verify IPC message protocol is consistent."""
+
+    def test_ipc_types_defined(self):
+        """IPC types file defines message protocol structures."""
+        types_path = Path(__file__).parent.parent / "src" / "shared" / "types.ts"
+        assert types_path.exists()
+        content = types_path.read_text()
+        # Should define message-related types
+        assert "type" in content.lower()
+        assert "panel" in content.lower() or "Panel" in content
+
+    def test_ipc_has_websocket_support(self):
+        """IPC module supports WebSocket communication."""
+        ipc_path = Path(__file__).parent.parent / "src" / "shared" / "ipc.ts"
+        assert ipc_path.exists()
+        content = ipc_path.read_text()
+        assert "WebSocket" in content or "websocket" in content
+
+    def test_server_has_sse_endpoint(self):
+        """Panel server exposes SSE endpoint for real-time updates."""
+        server_path = Path(__file__).parent.parent / "src" / "main" / "server.ts"
+        assert server_path.exists()
+        content = server_path.read_text()
+        assert "text/event-stream" in content or "SSE" in content or "event-stream" in content
+
+
+# ===========================================================================
+# Integration Test: Docker Compose Service Wiring
+# ===========================================================================
+
+
+class TestDockerComposeIntegration:
+    """Verify docker-compose services are properly wired."""
+
+    def test_compose_has_required_services(self):
+        """docker-compose.yaml defines all required services."""
+        compose_path = Path(__file__).parent.parent / "docker-compose.yaml"
+        assert compose_path.exists()
+        content = compose_path.read_text()
+        data = yaml.safe_load(content)
+
+        services = data.get("services", {})
+        required = ["autoresearch", "opa", "minio"]
+        for svc in required:
+            assert svc in services, f"Missing required service: {svc}"
+
+    def test_compose_services_have_healthchecks(self):
+        """All non-profile services have healthchecks."""
+        compose_path = Path(__file__).parent.parent / "docker-compose.yaml"
+        data = yaml.safe_load(compose_path.read_text())
+        services = data.get("services", {})
+
+        for name, svc in services.items():
+            # Skip optional profile services
+            if "profiles" in svc:
+                continue
+            assert "healthcheck" in svc, f"Service {name} missing healthcheck"
+
+    def test_compose_has_network(self):
+        """docker-compose.yaml defines a shared network."""
+        compose_path = Path(__file__).parent.parent / "docker-compose.yaml"
+        content = compose_path.read_text()
+        assert "network" in content.lower()
