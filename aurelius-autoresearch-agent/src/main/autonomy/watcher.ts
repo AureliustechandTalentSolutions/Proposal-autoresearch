@@ -6,7 +6,7 @@
  */
 
 import { watch, type FSWatcher } from "fs";
-import { readdir, stat } from "fs/promises";
+import { readdir, stat, mkdir } from "fs/promises";
 import { join, extname, basename } from "path";
 import type { WatcherEvent, RPCResponse } from "../../shared/types";
 
@@ -59,6 +59,8 @@ export class Watcher {
 
   /**
    * Start watching the configured directory.
+   * Ensures the watch directory exists, then starts native file watching
+   * with polling as a fallback.
    */
   async start(): Promise<RPCResponse<void>> {
     if (this.running) {
@@ -67,20 +69,30 @@ export class Watcher {
 
     this.running = true;
 
+    // Ensure watch directory exists
+    try {
+      await mkdir(this.config.watchDir, { recursive: true });
+    } catch {
+      // Directory creation may fail in read-only filesystems; proceed anyway
+    }
+
     try {
       // Try native fs.watch first
       this.fsWatcher = watch(this.config.watchDir, { recursive: false }, (eventType, filename) => {
-        if (filename && eventType === "rename") {
+        if (filename) {
+          // Handle both rename (new file) and change (modified file) events
           this.handleFileChange(filename);
         }
       });
 
       this.fsWatcher.on("error", () => {
         // Fallback to polling if native watch fails
+        console.log("[Watcher] Native watch failed, falling back to polling");
         this.startPolling();
       });
     } catch {
       // Native watch not available, use polling
+      console.log("[Watcher] Native watch unavailable, using polling");
       this.startPolling();
     }
 

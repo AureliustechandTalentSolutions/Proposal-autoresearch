@@ -322,6 +322,53 @@ export class Governor {
     return "unknown";
   }
 
+  /**
+   * Export the audit log as a JSON-lines string for persistence.
+   */
+  exportAuditLog(): string {
+    return this.auditLog
+      .map((entry) => JSON.stringify(entry))
+      .join("\n");
+  }
+
+  /**
+   * Persist the audit log to disk using Bun.write.
+   */
+  async persistAuditLog(filePath: string): Promise<void> {
+    const data = this.exportAuditLog();
+    if (typeof globalThis.Bun !== "undefined") {
+      await Bun.write(filePath, data + "\n");
+    } else {
+      const fs = await import("node:fs/promises");
+      await fs.writeFile(filePath, data + "\n", "utf-8");
+    }
+  }
+
+  /**
+   * Get summary statistics of governor decisions.
+   */
+  getStats(): {
+    total: number;
+    allowed: number;
+    denied: number;
+    approvalRequired: number;
+    byLevel: Record<string, number>;
+  } {
+    let allowed = 0;
+    let denied = 0;
+    let approvalRequired = 0;
+    const byLevel: Record<string, number> = {};
+
+    for (const entry of this.auditLog) {
+      if (entry.decision.allowed) allowed++;
+      else denied++;
+      if (entry.decision.requiresApproval) approvalRequired++;
+      byLevel[entry.level] = (byLevel[entry.level] ?? 0) + 1;
+    }
+
+    return { total: this.auditLog.length, allowed, denied, approvalRequired, byLevel };
+  }
+
   private recordAudit(operation: string, decision: GovernorDecision): void {
     this.auditLog.push({
       timestamp: Date.now(),

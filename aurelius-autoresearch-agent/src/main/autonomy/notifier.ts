@@ -291,11 +291,54 @@ export class Notifier {
   }
 
   private sendSystemNotification(notification: Notification): void {
-    // Electrobun system tray notification
-    // In production, this calls the native notification API
     console.log(
       `[NOTIFICATION:${notification.priority.toUpperCase()}] ${notification.title}: ${notification.body}`,
     );
+
+    // Attempt native notification via notify-send (Linux) or osascript (macOS)
+    this.dispatchNativeNotification(notification).catch(() => {
+      // Native notification unavailable; console log is sufficient
+    });
+  }
+
+  /**
+   * Dispatch a native desktop notification using platform-specific tools.
+   * Uses Bun's shell capabilities for subprocess execution.
+   */
+  private async dispatchNativeNotification(notification: Notification): Promise<void> {
+    const urgency =
+      notification.priority === "critical"
+        ? "critical"
+        : notification.priority === "high"
+          ? "critical"
+          : "normal";
+
+    try {
+      const platform = process.platform;
+
+      if (platform === "linux") {
+        // Linux: use notify-send
+        const proc = Bun.spawn([
+          "notify-send",
+          "--urgency", urgency,
+          "--app-name", "Aurelius Workbench",
+          notification.title,
+          notification.body,
+        ], { stdout: "ignore", stderr: "ignore" });
+        await proc.exited;
+      } else if (platform === "darwin") {
+        // macOS: use osascript
+        const script = `display notification "${notification.body.replace(/"/g, '\\"')}" with title "${notification.title.replace(/"/g, '\\"')}"`;
+        const proc = Bun.spawn(["osascript", "-e", script], {
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        await proc.exited;
+      }
+      // Windows: would use PowerShell's New-BurntToastNotification or similar
+    } catch {
+      // Silently fail if native notification tools are not available
+    }
   }
 
   private trimNotifications(): void {
