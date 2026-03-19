@@ -1,0 +1,82 @@
+# OpenShell Sandbox Policy -- Level 1: Supervised
+#
+# Most restrictive policy. All inference stays local, no network access,
+# read-only filesystem except for a narrow scratch directory. Suitable for
+# initial deployments and untrusted agent code.
+
+name: level-1-supervised
+version: "1.0.0"
+description: >
+  Restrictive sandbox for supervised autonomy. No outbound network access,
+  read-only filesystem (except scratch), local-only LLM inference. Every
+  action is logged and requires human approval before execution.
+
+# --- Filesystem Permissions ---
+filesystem:
+  allowed_paths:
+    - "/workspace/proposals/**"
+    - "/workspace/rfps/**"
+    - "/workspace/artifacts/**"
+    - "/workspace/scratch/**"
+    - "/tmp/nemoclaw-*/**"
+  denied_paths:
+    - "/etc/**"
+    - "/var/**"
+    - "/home/**"
+    - "/root/**"
+    - "/proc/**"
+    - "/sys/**"
+    - "**/.env"
+    - "**/.ssh/**"
+    - "**/credentials*"
+    - "**/secrets*"
+  read_only_paths:
+    - "/workspace/proposals/**"
+    - "/workspace/rfps/**"
+    - "/workspace/artifacts/**"
+  max_disk_mb: 512
+
+# --- Network Permissions ---
+network:
+  enabled: false
+  allowed_hosts: []
+  blocked_hosts: []
+  max_bandwidth_kbps: 0
+
+# --- Tool Permissions ---
+tools:
+  allowed_tools:
+    - "file_read"
+    - "file_search"
+    - "text_analysis"
+    - "compliance_check"
+  denied_tools:
+    - "shell_exec"
+    - "http_request"
+    - "file_write"
+    - "file_delete"
+    - "docker_exec"
+    - "git_push"
+  default_allow: false
+
+# --- Resource Limits ---
+resource_limits:
+  memory_mb: 512
+  cpu_cores: 1
+  disk_mb: 512
+  max_task_seconds: 120
+  max_processes: 4
+
+# --- Privacy ---
+privacy_mode: "local"
+
+# --- Metadata ---
+metadata:
+  autonomy_level: 1
+  label: "supervised"
+  requires_approval: true
+  docker_network_mode: "none"
+  docker_read_only_root: true
+  docker_no_new_privileges: true
+  docker_cap_drop:
+    - "ALL"

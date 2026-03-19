@@ -6,8 +6,9 @@
  * a composite score with per-dimension breakdowns.
  */
 
-import { task, logger } from "@trigger.dev/sdk";
+import { task, logger } from "@trigger.dev/sdk/v3";
 import { z } from "zod";
+import * as Minio from "minio";
 import { TASK_DEFAULTS, MINIO_CONFIG, OPA_CONFIG } from "../client";
 import { callLLM } from "../llm/provider";
 
@@ -60,10 +61,15 @@ const DIMENSION_WEIGHTS: Record<string, number> = {
   compliance_matrix: 10,
 };
 
+const minioClient = new Minio.Client(MINIO_CONFIG);
+
 export const evaluateScore = task({
   id: "score-evaluate",
   retry: {
     maxAttempts: TASK_DEFAULTS.maxRetries,
+    factor: TASK_DEFAULTS.retryBackoffFactor,
+    minTimeoutInMs: TASK_DEFAULTS.retryMinDelaySeconds * 1000,
+    maxTimeoutInMs: TASK_DEFAULTS.retryMaxDelaySeconds * 1000,
   },
   run: async (payload: unknown) => {
     const params = ScorePayload.parse(payload);
@@ -73,16 +79,13 @@ export const evaluateScore = task({
       dimensions: params.dimensions,
     });
 
-    // Fetch artifact
-    const artifactResponse = await fetch(
-      `${MINIO_CONFIG.endpoint}/${params.bucket}/${params.artifactKey}`,
-    );
-
-    if (!artifactResponse.ok) {
-      throw new Error(`Failed to fetch artifact: ${artifactResponse.statusText}`);
+    // Fetch artifact from MinIO
+    const artifactStream = await minioClient.getObject(params.bucket, params.artifactKey);
+    const chunks: Buffer[] = [];
+    for await (const chunk of artifactStream) {
+      chunks.push(Buffer.from(chunk));
     }
-
-    const content = await artifactResponse.text();
+    const content = Buffer.concat(chunks).toString("utf-8");
 
     // Evaluate each dimension
     const dimensionScores: DimensionScore[] = [];
@@ -107,12 +110,22 @@ export const evaluateScore = task({
       artifactKey: params.artifactKey,
     };
 
-    // Store score result
-    await fetch(`${MINIO_CONFIG.endpoint}/scores/${params.artifactKey}.score.json`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(composite),
-    });
+    // Store score result in MinIO
+    const scoreJson = JSON.stringify(composite);
+    const scoreBuffer = Buffer.from(scoreJson, "utf-8");
+
+    const bucketExists = await minioClient.bucketExists("scores");
+    if (!bucketExists) {
+      await minioClient.makeBucket("scores");
+    }
+
+    await minioClient.putObject(
+      "scores",
+      `${params.artifactKey}.score.json`,
+      scoreBuffer,
+      scoreBuffer.length,
+      { "Content-Type": "application/json" },
+    );
 
     logger.info("Score evaluation complete", {
       overall,

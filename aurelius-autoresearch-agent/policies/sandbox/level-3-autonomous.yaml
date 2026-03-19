@@ -1,0 +1,105 @@
+# OpenShell Sandbox Policy -- Level 3: Autonomous
+#
+# Most permissive policy. Broad network access (with deny list), full
+# project filesystem access, hybrid LLM routing, and comprehensive audit
+# logging. All actions are fully autonomous but every operation is recorded.
+
+name: level-3-autonomous
+version: "1.0.0"
+description: >
+  Permissive sandbox for fully autonomous operation. Broad network access
+  with a deny list, full workspace filesystem access, hybrid LLM routing.
+  All operations are logged for audit. Use only after the agent has
+  demonstrated consistent quality in guided mode.
+
+# --- Filesystem Permissions ---
+filesystem:
+  allowed_paths:
+    - "/workspace/**"
+    - "/tmp/**"
+    - "/data/**"
+    - "/opt/nemoclaw/**"
+  denied_paths:
+    - "/etc/shadow"
+    - "/etc/gshadow"
+    - "/root/**"
+    - "/proc/kcore"
+    - "/sys/**"
+    - "**/.ssh/id_*"
+    - "**/.ssh/known_hosts"
+    - "**/credentials.json"
+    - "**/.env.production"
+  read_only_paths:
+    - "/data/models/**"
+  max_disk_mb: 10240
+
+# --- Network Permissions ---
+network:
+  enabled: true
+  allowed_hosts:
+    - "api.anthropic.com:443"
+    - "api.openai.com:443"
+    - "localhost:*"
+    - "sam.gov:443"
+    - "beta.sam.gov:443"
+    - "scholar.google.com:443"
+    - "arxiv.org:443"
+    - "api.semanticscholar.org:443"
+    - "github.com:443"
+    - "api.github.com:443"
+    - "pypi.org:443"
+    - "registry.npmjs.org:443"
+  blocked_hosts:
+    - "*.onion:*"
+    - "pastebin.com:*"
+    - "transfer.sh:*"
+    - "*.torproject.org:*"
+    - "file.io:*"
+  max_bandwidth_kbps: 51200
+
+# --- Tool Permissions ---
+tools:
+  allowed_tools:
+    - "file_read"
+    - "file_write"
+    - "file_search"
+    - "file_delete"
+    - "text_analysis"
+    - "compliance_check"
+    - "http_request"
+    - "pdf_parse"
+    - "docx_generate"
+    - "shell_exec"
+    - "git_commit"
+  denied_tools:
+    - "docker_exec"
+    - "git_push"
+    - "git_force_push"
+  default_allow: false
+
+# --- Resource Limits ---
+resource_limits:
+  memory_mb: 8192
+  cpu_cores: 4
+  disk_mb: 20480
+  max_task_seconds: 1800
+  max_processes: 64
+
+# --- Privacy ---
+privacy_mode: "hybrid"
+
+# --- Metadata ---
+metadata:
+  autonomy_level: 3
+  label: "autonomous"
+  requires_approval: false
+  write_requires_approval: false
+  full_audit_logging: true
+  docker_network_mode: "bridge"
+  docker_read_only_root: false
+  docker_no_new_privileges: true
+  docker_cap_drop:
+    - "SYS_ADMIN"
+    - "SYS_PTRACE"
+    - "MKNOD"
+    - "NET_RAW"

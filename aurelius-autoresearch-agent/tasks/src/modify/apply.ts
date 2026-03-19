@@ -6,9 +6,10 @@
  * validates the modification against constraints, and stores the result.
  */
 
-import { task, logger } from "@trigger.dev/sdk";
+import { task, logger } from "@trigger.dev/sdk/v3";
 import { z } from "zod";
-import { client, TASK_DEFAULTS, MINIO_CONFIG, OPA_CONFIG } from "../client";
+import * as Minio from "minio";
+import { TASK_DEFAULTS, MINIO_CONFIG, OPA_CONFIG } from "../client";
 import { callLLM } from "../llm/provider";
 
 const ModifyPayload = z.object({
@@ -41,10 +42,15 @@ export interface ModificationResult {
   constraintsPassed: boolean;
 }
 
+const minioClient = new Minio.Client(MINIO_CONFIG);
+
 export const applyModification = task({
   id: "modify-apply",
   retry: {
     maxAttempts: TASK_DEFAULTS.maxRetries,
+    factor: TASK_DEFAULTS.retryBackoffFactor,
+    minTimeoutInMs: TASK_DEFAULTS.retryMinDelaySeconds * 1000,
+    maxTimeoutInMs: TASK_DEFAULTS.retryMaxDelaySeconds * 1000,
   },
   run: async (payload: unknown) => {
     const params = ModifyPayload.parse(payload);
@@ -55,16 +61,13 @@ export const applyModification = task({
       targetSection: params.hypothesis.targetSection,
     });
 
-    // Fetch original artifact
-    const originalResponse = await fetch(
-      `${MINIO_CONFIG.endpoint}/${params.bucket}/${params.artifactKey}`,
-    );
-
-    if (!originalResponse.ok) {
-      throw new Error(`Failed to fetch artifact: ${originalResponse.statusText}`);
+    // Fetch original artifact from MinIO
+    const artifactStream = await minioClient.getObject(params.bucket, params.artifactKey);
+    const chunks: Buffer[] = [];
+    for await (const chunk of artifactStream) {
+      chunks.push(Buffer.from(chunk));
     }
-
-    const originalContent = await originalResponse.text();
+    const originalContent = Buffer.concat(chunks).toString("utf-8");
 
     // Generate modification via LLM
     const prompt = buildModificationPrompt(originalContent, params.hypothesis, params.maxDeltaChars);
@@ -115,21 +118,24 @@ export const applyModification = task({
       };
     }
 
-    // Store modified artifact
+    // Store modified artifact via MinIO client
     const versionSuffix = params.createVersion
       ? `.v${Date.now()}`
       : "";
     const modifiedKey = `${params.artifactKey}${versionSuffix}`;
+    const modifiedBuffer = Buffer.from(modifiedContent, "utf-8");
 
-    await fetch(`${MINIO_CONFIG.endpoint}/${params.bucket}/${modifiedKey}`, {
-      method: "PUT",
-      headers: {
+    await minioClient.putObject(
+      params.bucket,
+      modifiedKey,
+      modifiedBuffer,
+      modifiedBuffer.length,
+      {
         "Content-Type": "text/plain",
         "x-amz-meta-hypothesis-id": params.hypothesis.id,
         "x-amz-meta-original-key": params.artifactKey,
       },
-      body: modifiedContent,
-    });
+    );
 
     const result: ModificationResult = {
       originalKey: params.artifactKey,

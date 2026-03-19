@@ -1,0 +1,96 @@
+# OpenShell Sandbox Policy -- Level 2: Guided
+#
+# Moderate policy. Network access limited to whitelisted endpoints,
+# project-scoped filesystem access, hybrid LLM routing (local for CUI,
+# cloud for general tasks). Read-only and evaluation tasks run autonomously;
+# modifications require human approval.
+
+name: level-2-guided
+version: "1.0.0"
+description: >
+  Standard sandbox for guided autonomy. Whitelisted network endpoints,
+  project-scoped filesystem with write access to working directories,
+  hybrid LLM routing. Evaluations and reads are autonomous; writes need approval.
+
+# --- Filesystem Permissions ---
+filesystem:
+  allowed_paths:
+    - "/workspace/**"
+    - "/tmp/nemoclaw-*/**"
+    - "/data/models/**"
+  denied_paths:
+    - "/etc/shadow"
+    - "/etc/passwd"
+    - "/root/**"
+    - "/proc/**"
+    - "/sys/**"
+    - "**/.env"
+    - "**/.ssh/**"
+    - "**/credentials*"
+    - "**/secrets*"
+    - "/workspace/.git/config"
+  read_only_paths:
+    - "/workspace/rfps/**"
+    - "/data/models/**"
+  max_disk_mb: 2048
+
+# --- Network Permissions ---
+network:
+  enabled: true
+  allowed_hosts:
+    - "api.anthropic.com:443"
+    - "api.openai.com:443"
+    - "localhost:11434"
+    - "localhost:9000"
+    - "localhost:8181"
+    - "sam.gov:443"
+    - "beta.sam.gov:443"
+  blocked_hosts:
+    - "*.onion:*"
+    - "pastebin.com:*"
+    - "transfer.sh:*"
+  max_bandwidth_kbps: 10240
+
+# --- Tool Permissions ---
+tools:
+  allowed_tools:
+    - "file_read"
+    - "file_write"
+    - "file_search"
+    - "text_analysis"
+    - "compliance_check"
+    - "http_request"
+    - "pdf_parse"
+    - "docx_generate"
+  denied_tools:
+    - "shell_exec"
+    - "docker_exec"
+    - "git_push"
+    - "file_delete"
+  default_allow: false
+
+# --- Resource Limits ---
+resource_limits:
+  memory_mb: 2048
+  cpu_cores: 2
+  disk_mb: 4096
+  max_task_seconds: 600
+  max_processes: 16
+
+# --- Privacy ---
+privacy_mode: "hybrid"
+
+# --- Metadata ---
+metadata:
+  autonomy_level: 2
+  label: "guided"
+  requires_approval: false
+  write_requires_approval: true
+  docker_network_mode: "bridge"
+  docker_read_only_root: false
+  docker_no_new_privileges: true
+  docker_cap_drop:
+    - "NET_RAW"
+    - "SYS_ADMIN"
+    - "SYS_PTRACE"
+    - "MKNOD"

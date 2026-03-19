@@ -6,9 +6,10 @@
  * results to propose targeted modifications.
  */
 
-import { task, logger } from "@trigger.dev/sdk";
+import { task, logger } from "@trigger.dev/sdk/v3";
 import { z } from "zod";
-import { client, TASK_DEFAULTS, MINIO_CONFIG } from "../client";
+import * as Minio from "minio";
+import { TASK_DEFAULTS, MINIO_CONFIG } from "../client";
 import { callLLM } from "../llm/provider";
 
 const HypothesisPayload = z.object({
@@ -46,10 +47,15 @@ export interface Hypothesis {
   confidence: number;
 }
 
+const minioClient = new Minio.Client(MINIO_CONFIG);
+
 export const generateHypotheses = task({
   id: "hypothesis-generate",
   retry: {
     maxAttempts: TASK_DEFAULTS.maxRetries,
+    factor: TASK_DEFAULTS.retryBackoffFactor,
+    minTimeoutInMs: TASK_DEFAULTS.retryMinDelaySeconds * 1000,
+    maxTimeoutInMs: TASK_DEFAULTS.retryMaxDelaySeconds * 1000,
   },
   run: async (payload: unknown) => {
     const params = HypothesisPayload.parse(payload);
@@ -60,16 +66,13 @@ export const generateHypotheses = task({
       maxHypotheses: params.maxHypotheses,
     });
 
-    // Fetch the artifact content from MinIO
-    const artifactResponse = await fetch(
-      `${MINIO_CONFIG.endpoint}/${params.bucket}/${params.artifactKey}`,
-    );
-
-    if (!artifactResponse.ok) {
-      throw new Error(`Failed to fetch artifact: ${artifactResponse.statusText}`);
+    // Fetch the artifact content from MinIO using the official client
+    const artifactStream = await minioClient.getObject(params.bucket, params.artifactKey);
+    const chunks: Buffer[] = [];
+    for await (const chunk of artifactStream) {
+      chunks.push(Buffer.from(chunk));
     }
-
-    const artifactContent = await artifactResponse.text();
+    const artifactContent = Buffer.concat(chunks).toString("utf-8");
 
     // Build the analysis prompt
     const prompt = buildHypothesisPrompt({
@@ -99,17 +102,28 @@ export const generateHypotheses = task({
 
     logger.info("Hypotheses generated", { count: hypotheses.length });
 
-    // Store hypotheses as an artifact
-    await fetch(`${MINIO_CONFIG.endpoint}/hypotheses/${params.artifactKey}.hypotheses.json`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sourceArtifact: params.artifactKey,
-        generatedAt: new Date().toISOString(),
-        focusArea: params.focusArea,
-        hypotheses,
-      }),
+    // Store hypotheses as an artifact using MinIO client
+    const hypothesesJson = JSON.stringify({
+      sourceArtifact: params.artifactKey,
+      generatedAt: new Date().toISOString(),
+      focusArea: params.focusArea,
+      hypotheses,
     });
+    const hypothesesBuffer = Buffer.from(hypothesesJson, "utf-8");
+
+    // Ensure the hypotheses bucket exists
+    const bucketExists = await minioClient.bucketExists("hypotheses");
+    if (!bucketExists) {
+      await minioClient.makeBucket("hypotheses");
+    }
+
+    await minioClient.putObject(
+      "hypotheses",
+      `${params.artifactKey}.hypotheses.json`,
+      hypothesesBuffer,
+      hypothesesBuffer.length,
+      { "Content-Type": "application/json" },
+    );
 
     return {
       success: true,

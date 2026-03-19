@@ -6,8 +6,9 @@
  * proper directory structure and file naming conventions.
  */
 
-import { task, logger } from "@trigger.dev/sdk";
+import { task, logger } from "@trigger.dev/sdk/v3";
 import { z } from "zod";
+import * as Minio from "minio";
 import { TASK_DEFAULTS, MINIO_CONFIG, OPA_CONFIG } from "../client";
 
 const ExportPayload = z.object({
@@ -48,10 +49,15 @@ export interface PackageResult {
   createdAt: string;
 }
 
+const minioClient = new Minio.Client(MINIO_CONFIG);
+
 export const exportPackage = task({
   id: "export-package",
   retry: {
     maxAttempts: TASK_DEFAULTS.maxRetries,
+    factor: TASK_DEFAULTS.retryBackoffFactor,
+    minTimeoutInMs: TASK_DEFAULTS.retryMinDelaySeconds * 1000,
+    maxTimeoutInMs: TASK_DEFAULTS.retryMaxDelaySeconds * 1000,
   },
   run: async (payload: unknown) => {
     const params = ExportPayload.parse(payload);
@@ -75,39 +81,39 @@ export const exportPackage = task({
     // Collect all files
     const files: Array<{ path: string; data: Buffer }> = [];
 
-    // Fetch volumes
+    // Fetch volumes from MinIO
     for (const volume of params.volumes) {
-      const response = await fetch(
-        `${MINIO_CONFIG.endpoint}/volumes/${volume.key}`,
-      );
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch volume: ${volume.key}`);
+      try {
+        const stream = await minioClient.getObject("volumes", volume.key);
+        const chunks: Buffer[] = [];
+        for await (const chunk of stream) {
+          chunks.push(Buffer.from(chunk));
+        }
+        files.push({
+          path: `${params.solicitationNumber}/volumes/${volume.filename}`,
+          data: Buffer.concat(chunks),
+        });
+      } catch (err) {
+        throw new Error(`Failed to fetch volume: ${volume.key} - ${err}`);
       }
-
-      const data = Buffer.from(await response.arrayBuffer());
-      files.push({
-        path: `${params.solicitationNumber}/volumes/${volume.filename}`,
-        data,
-      });
     }
 
-    // Fetch supporting documents
+    // Fetch supporting documents from MinIO
     for (const doc of params.supportingDocs) {
-      const response = await fetch(
-        `${MINIO_CONFIG.endpoint}/proposals/${doc.key}`,
-      );
-
-      if (!response.ok) {
-        logger.warn(`Failed to fetch supporting doc: ${doc.key}`);
+      try {
+        const stream = await minioClient.getObject("proposals", doc.key);
+        const chunks: Buffer[] = [];
+        for await (const chunk of stream) {
+          chunks.push(Buffer.from(chunk));
+        }
+        files.push({
+          path: `${params.solicitationNumber}/supporting/${doc.category}/${doc.filename}`,
+          data: Buffer.concat(chunks),
+        });
+      } catch (err) {
+        logger.warn(`Failed to fetch supporting doc: ${doc.key}`, { err });
         continue;
       }
-
-      const data = Buffer.from(await response.arrayBuffer());
-      files.push({
-        path: `${params.solicitationNumber}/supporting/${doc.category}/${doc.filename}`,
-        data,
-      });
     }
 
     // Create manifest
@@ -158,17 +164,23 @@ export const exportPackage = task({
     const extension = params.format === "zip" ? "zip" : "tar.gz";
     const packageKey = `${params.solicitationNumber}/proposal_package.${extension}`;
 
-    // Upload package to MinIO
-    await fetch(`${MINIO_CONFIG.endpoint}/${params.outputBucket}/${packageKey}`, {
-      method: "PUT",
-      headers: {
-        "Content-Type":
-          params.format === "zip"
-            ? "application/zip"
-            : "application/gzip",
+    // Ensure output bucket exists and upload package to MinIO
+    const outputBucketExists = await minioClient.bucketExists(params.outputBucket);
+    if (!outputBucketExists) {
+      await minioClient.makeBucket(params.outputBucket);
+    }
+
+    await minioClient.putObject(
+      params.outputBucket,
+      packageKey,
+      packageBuffer,
+      packageBuffer.length,
+      {
+        "Content-Type": params.format === "zip"
+          ? "application/zip"
+          : "application/gzip",
       },
-      body: packageBuffer,
-    });
+    );
 
     const result: PackageResult = {
       packageKey,

@@ -6,8 +6,9 @@
  * human review and refinement.
  */
 
-import { task, logger } from "@trigger.dev/sdk";
+import { task, logger } from "@trigger.dev/sdk/v3";
 import { z } from "zod";
+import * as Minio from "minio";
 import { TASK_DEFAULTS, MINIO_CONFIG } from "../client";
 import { callLLM } from "../llm/provider";
 
@@ -54,10 +55,15 @@ export interface VolumeSection {
   requirementsCovered: string[];
 }
 
+const minioClient = new Minio.Client(MINIO_CONFIG);
+
 export const generateVolume = task({
   id: "generate-volume",
   retry: {
     maxAttempts: TASK_DEFAULTS.maxRetries,
+    factor: TASK_DEFAULTS.retryBackoffFactor,
+    minTimeoutInMs: TASK_DEFAULTS.retryMinDelaySeconds * 1000,
+    maxTimeoutInMs: TASK_DEFAULTS.retryMaxDelaySeconds * 1000,
   },
   run: async (payload: unknown) => {
     const params = VolumePayload.parse(payload);
@@ -68,14 +74,18 @@ export const generateVolume = task({
       pageLimit: params.pageLimit,
     });
 
-    // Fetch outline if provided
+    // Fetch outline if provided from MinIO
     let outline = "";
     if (params.outlineKey) {
-      const outlineResponse = await fetch(
-        `${MINIO_CONFIG.endpoint}/templates/${params.outlineKey}`,
-      );
-      if (outlineResponse.ok) {
-        outline = await outlineResponse.text();
+      try {
+        const outlineStream = await minioClient.getObject("templates", params.outlineKey);
+        const outlineChunks: Buffer[] = [];
+        for await (const chunk of outlineStream) {
+          outlineChunks.push(Buffer.from(chunk));
+        }
+        outline = Buffer.concat(outlineChunks).toString("utf-8");
+      } catch (err) {
+        logger.warn("Failed to fetch outline template", { key: params.outlineKey, err });
       }
     }
 
@@ -139,24 +149,37 @@ export const generateVolume = task({
       isDraft: params.isDraft,
     };
 
-    // Store the generated volume
-    const volumeKey = `${params.solicitationNumber}/${params.volumeType}_volume.json`;
-    await fetch(`${MINIO_CONFIG.endpoint}/volumes/${volumeKey}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(volume),
-    });
+    // Ensure volumes bucket exists
+    const volumesBucketExists = await minioClient.bucketExists("volumes");
+    if (!volumesBucketExists) {
+      await minioClient.makeBucket("volumes");
+    }
 
-    // Also store as plain text for readability
+    // Store the generated volume as JSON
+    const volumeKey = `${params.solicitationNumber}/${params.volumeType}_volume.json`;
+    const volumeJson = Buffer.from(JSON.stringify(volume), "utf-8");
+    await minioClient.putObject(
+      "volumes",
+      volumeKey,
+      volumeJson,
+      volumeJson.length,
+      { "Content-Type": "application/json" },
+    );
+
+    // Also store as markdown for readability
     const textContent = sections
       .map((s) => `\n${"#".repeat(2)} ${s.number} ${s.title}\n\n${s.content}`)
       .join("\n\n");
     const textKey = `${params.solicitationNumber}/${params.volumeType}_volume.md`;
-    await fetch(`${MINIO_CONFIG.endpoint}/volumes/${textKey}`, {
-      method: "PUT",
-      headers: { "Content-Type": "text/markdown" },
-      body: `# ${params.volumeType.charAt(0).toUpperCase() + params.volumeType.slice(1)} Volume\n\nSolicitation: ${params.solicitationNumber}\nGenerated: ${volume.generatedAt}\nStatus: ${params.isDraft ? "DRAFT" : "FINAL"}\n\n${textContent}`,
-    });
+    const mdContent = `# ${params.volumeType.charAt(0).toUpperCase() + params.volumeType.slice(1)} Volume\n\nSolicitation: ${params.solicitationNumber}\nGenerated: ${volume.generatedAt}\nStatus: ${params.isDraft ? "DRAFT" : "FINAL"}\n\n${textContent}`;
+    const mdBuffer = Buffer.from(mdContent, "utf-8");
+    await minioClient.putObject(
+      "volumes",
+      textKey,
+      mdBuffer,
+      mdBuffer.length,
+      { "Content-Type": "text/markdown" },
+    );
 
     logger.info("Volume generated", {
       sections: sections.length,

@@ -6,8 +6,9 @@
  * Stores extracted content in MinIO for downstream processing.
  */
 
-import { task, logger } from "@trigger.dev/sdk";
+import { task, logger } from "@trigger.dev/sdk/v3";
 import { z } from "zod";
+import * as Minio from "minio";
 import { TASK_DEFAULTS, MINIO_CONFIG } from "../client";
 
 const ParsePdfPayload = z.object({
@@ -62,10 +63,15 @@ export interface DocumentTable {
   caption?: string;
 }
 
+const minioClient = new Minio.Client(MINIO_CONFIG);
+
 export const parsePdf = task({
   id: "parse-pdf",
   retry: {
     maxAttempts: TASK_DEFAULTS.maxRetries,
+    factor: TASK_DEFAULTS.retryBackoffFactor,
+    minTimeoutInMs: TASK_DEFAULTS.retryMinDelaySeconds * 1000,
+    maxTimeoutInMs: TASK_DEFAULTS.retryMaxDelaySeconds * 1000,
   },
   run: async (payload: unknown) => {
     const params = ParsePdfPayload.parse(payload);
@@ -76,16 +82,13 @@ export const parsePdf = task({
       extractStructure: params.extractStructure,
     });
 
-    // Fetch PDF from MinIO
-    const pdfResponse = await fetch(
-      `${MINIO_CONFIG.endpoint}/${params.bucket}/${params.fileKey}`,
-    );
-
-    if (!pdfResponse.ok) {
-      throw new Error(`Failed to fetch PDF: ${pdfResponse.statusText}`);
+    // Fetch PDF from MinIO using the official client
+    const pdfStream = await minioClient.getObject(params.bucket, params.fileKey);
+    const pdfChunks: Buffer[] = [];
+    for await (const chunk of pdfStream) {
+      pdfChunks.push(Buffer.from(chunk));
     }
-
-    const pdfBuffer = Buffer.from(await pdfResponse.arrayBuffer());
+    const pdfBuffer = Buffer.concat(pdfChunks);
     const fileSize = pdfBuffer.length;
 
     // Parse PDF using pdf-parse
@@ -125,21 +128,33 @@ export const parsePdf = task({
       tables,
     };
 
+    // Ensure output bucket exists
+    const outputBucketExists = await minioClient.bucketExists(params.outputBucket);
+    if (!outputBucketExists) {
+      await minioClient.makeBucket(params.outputBucket);
+    }
+
     // Store extracted content
     const outputKey = params.fileKey.replace(/\.pdf$/i, ".parsed.json");
-    await fetch(`${MINIO_CONFIG.endpoint}/${params.outputBucket}/${outputKey}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(result),
-    });
+    const resultJson = Buffer.from(JSON.stringify(result), "utf-8");
+    await minioClient.putObject(
+      params.outputBucket,
+      outputKey,
+      resultJson,
+      resultJson.length,
+      { "Content-Type": "application/json" },
+    );
 
     // Store raw text separately for search/indexing
     const textKey = params.fileKey.replace(/\.pdf$/i, ".txt");
-    await fetch(`${MINIO_CONFIG.endpoint}/${params.outputBucket}/${textKey}`, {
-      method: "PUT",
-      headers: { "Content-Type": "text/plain" },
-      body: parsed.text,
-    });
+    const textBuffer = Buffer.from(parsed.text, "utf-8");
+    await minioClient.putObject(
+      params.outputBucket,
+      textKey,
+      textBuffer,
+      textBuffer.length,
+      { "Content-Type": "text/plain" },
+    );
 
     logger.info("PDF parsed", {
       pageCount: parsed.numpages,

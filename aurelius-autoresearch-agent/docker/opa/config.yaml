@@ -1,0 +1,39 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# OPA Server Configuration for Aurelius Autonomous Workbench
+# ─────────────────────────────────────────────────────────────────────────────
+# Documentation: https://www.openpolicyagent.org/docs/latest/configuration/
+
+labels:
+  app: aurelius-workbench
+  environment: development
+
+# Decision logging - records every policy decision for audit
+decision_logs:
+  console: true
+  reporting:
+    min_delay_seconds: 60
+    max_delay_seconds: 300
+
+# Status reporting
+status:
+  console: true
+
+# Default authorisation policy (allow all in dev; override for production)
+default_authorization_decision: /system/authz/allow
+default_decision: /system/main
+
+# Server configuration
+server:
+  encoding:
+    gzip:
+      min_length: 1024
+      compression_level: 6
+
+# Caching for compiled policies
+caching:
+  inter_query_builtin_cache:
+    max_size_bytes: 104857600  # 100 MB
+
+# Persistence - write bundles to disk so they survive restarts
+persistence:
+  directory: /tmp/opa/persistence
