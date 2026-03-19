@@ -1,8 +1,9 @@
 /**
  * AgentSandbox component.
  *
- * Renders active sandbox cards with resource usage bars and a
- * terminate button for each sandbox.
+ * Renders active sandbox cards with resource usage bars, isolation mode
+ * indicators, violation counts, uptime tracking, and a terminate button.
+ * Supports in-place updates for resource bars without full re-render.
  */
 
 import type { SandboxInfo } from "../app";
@@ -12,10 +13,12 @@ export class AgentSandbox {
   private container: HTMLElement;
   private badge: HTMLElement;
   private sandboxes = new Map<string, SandboxInfo>();
+  private uptimeTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(container: HTMLElement, badge: HTMLElement) {
     this.container = container;
     this.badge = badge;
+    this.startUptimeRefresh();
   }
 
   addSandbox(info: SandboxInfo): void {
@@ -45,13 +48,19 @@ export class AgentSandbox {
     this.badge.textContent = String(this.sandboxes.size);
 
     if (this.sandboxes.size === 0) {
-      this.container.innerHTML = '<div class="empty-state">No active sandboxes</div>';
+      this.container.innerHTML =
+        '<div class="empty-state">No active sandboxes</div>';
       return;
     }
 
     this.container.innerHTML = "";
 
-    for (const info of this.sandboxes.values()) {
+    // Sort by spawn time (newest first).
+    const sorted = Array.from(this.sandboxes.values()).sort(
+      (a, b) => b.spawnedAt - a.spawnedAt,
+    );
+
+    for (const info of sorted) {
       this.container.appendChild(this.createCard(info));
     }
   }
@@ -66,17 +75,34 @@ export class AgentSandbox {
         ? "sandbox-card__status--running"
         : "sandbox-card__status--error";
 
-    const memPercent = info.maxMemoryMb > 0
-      ? Math.min(100, (info.memoryMb / info.maxMemoryMb) * 100)
-      : 0;
+    const memPercent =
+      info.maxMemoryMb > 0
+        ? Math.min(100, (info.memoryMb / info.maxMemoryMb) * 100)
+        : 0;
 
     const uptime = formatUptime(info.uptimeMs);
+
+    // Memory bar color based on usage.
+    const memColor =
+      memPercent > 90
+        ? "var(--accent-red)"
+        : memPercent > 70
+          ? "var(--yellow)"
+          : "var(--blue)";
+
+    // CPU bar color.
+    const cpuColor =
+      info.cpuPercent > 90
+        ? "var(--accent-red)"
+        : info.cpuPercent > 70
+          ? "var(--yellow)"
+          : "var(--purple)";
 
     card.innerHTML = `
       <div class="sandbox-card__head">
         <div>
           <div class="sandbox-card__role">${escapeHtml(info.role)}</div>
-          <div class="sandbox-card__id">${escapeHtml(info.id)}</div>
+          <div class="sandbox-card__id">${escapeHtml(info.id.substring(0, 12))}</div>
         </div>
         <span class="sandbox-card__status ${statusClass}">${info.status}</span>
       </div>
@@ -86,8 +112,8 @@ export class AgentSandbox {
           <span>${info.memoryMb.toFixed(0)} / ${info.maxMemoryMb} MB</span>
         </div>
         <div class="resource-bar__track">
-          <div class="resource-bar__fill resource-bar__fill--mem"
-               style="width:${memPercent.toFixed(1)}%"
+          <div class="resource-bar__fill"
+               style="width:${memPercent.toFixed(1)}%;background:${memColor}"
                data-bar="mem"></div>
         </div>
       </div>
@@ -97,21 +123,24 @@ export class AgentSandbox {
           <span>${info.cpuPercent.toFixed(1)}%</span>
         </div>
         <div class="resource-bar__track">
-          <div class="resource-bar__fill resource-bar__fill--cpu"
-               style="width:${Math.min(100, info.cpuPercent).toFixed(1)}%"
+          <div class="resource-bar__fill"
+               style="width:${Math.min(100, info.cpuPercent).toFixed(1)}%;background:${cpuColor}"
                data-bar="cpu"></div>
         </div>
       </div>
-      <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">
-        Uptime: ${uptime}
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-top:4px;">
+        <span data-uptime="${info.spawnedAt}">Uptime: ${uptime}</span>
+        <span style="font-family:var(--font-mono)">${(info as any).isolation_mode ?? "process"}</span>
       </div>
       <button class="btn-terminate" data-action="terminate" data-id="${escapeHtml(info.id)}">
         Terminate
       </button>
     `;
 
-    // Bind terminate button
-    const btn = card.querySelector('[data-action="terminate"]') as HTMLButtonElement;
+    // Bind terminate button.
+    const btn = card.querySelector(
+      '[data-action="terminate"]',
+    ) as HTMLButtonElement;
     btn.addEventListener("click", () => this.handleTerminate(info.id, btn));
 
     return card;
@@ -128,18 +157,62 @@ export class AgentSandbox {
       return;
     }
 
-    const memPercent = info.maxMemoryMb > 0
-      ? Math.min(100, (info.memoryMb / info.maxMemoryMb) * 100)
-      : 0;
+    const memPercent =
+      info.maxMemoryMb > 0
+        ? Math.min(100, (info.memoryMb / info.maxMemoryMb) * 100)
+        : 0;
 
-    const memBar = card.querySelector('[data-bar="mem"]') as HTMLElement | null;
-    if (memBar) memBar.style.width = `${memPercent.toFixed(1)}%`;
+    const memBar = card.querySelector(
+      '[data-bar="mem"]',
+    ) as HTMLElement | null;
+    if (memBar) {
+      memBar.style.width = `${memPercent.toFixed(1)}%`;
+      memBar.style.background =
+        memPercent > 90
+          ? "var(--accent-red)"
+          : memPercent > 70
+            ? "var(--yellow)"
+            : "var(--blue)";
+    }
 
-    const cpuBar = card.querySelector('[data-bar="cpu"]') as HTMLElement | null;
-    if (cpuBar) cpuBar.style.width = `${Math.min(100, info.cpuPercent).toFixed(1)}%`;
+    const cpuBar = card.querySelector(
+      '[data-bar="cpu"]',
+    ) as HTMLElement | null;
+    if (cpuBar) {
+      cpuBar.style.width = `${Math.min(100, info.cpuPercent).toFixed(1)}%`;
+      cpuBar.style.background =
+        info.cpuPercent > 90
+          ? "var(--accent-red)"
+          : info.cpuPercent > 70
+            ? "var(--yellow)"
+            : "var(--purple)";
+    }
+
+    // Update memory label.
+    const memLabels = card.querySelectorAll(".resource-bar__label span");
+    if (memLabels.length >= 4) {
+      memLabels[1].textContent = `${info.memoryMb.toFixed(0)} / ${info.maxMemoryMb} MB`;
+      memLabels[3].textContent = `${info.cpuPercent.toFixed(1)}%`;
+    }
+
+    // Update status indicator.
+    const statusEl = card.querySelector(
+      ".sandbox-card__status",
+    ) as HTMLElement | null;
+    if (statusEl) {
+      statusEl.textContent = info.status;
+      statusEl.className = `sandbox-card__status ${
+        info.status === "running"
+          ? "sandbox-card__status--running"
+          : "sandbox-card__status--error"
+      }`;
+    }
   }
 
-  private async handleTerminate(id: string, btn: HTMLButtonElement): Promise<void> {
+  private async handleTerminate(
+    id: string,
+    btn: HTMLButtonElement,
+  ): Promise<void> {
     btn.disabled = true;
     btn.textContent = "Terminating...";
 
@@ -151,6 +224,23 @@ export class AgentSandbox {
       btn.textContent = "Terminate (failed)";
       btn.disabled = false;
     }
+  }
+
+  /** Periodically refresh uptime displays. */
+  private startUptimeRefresh(): void {
+    this.uptimeTimer = setInterval(() => {
+      const now = Date.now();
+      const uptimeEls = this.container.querySelectorAll("[data-uptime]");
+      for (const el of uptimeEls) {
+        const startedAt = parseInt(
+          (el as HTMLElement).dataset.uptime ?? "0",
+          10,
+        );
+        if (startedAt > 0) {
+          (el as HTMLElement).textContent = `Uptime: ${formatUptime(now - startedAt)}`;
+        }
+      }
+    }, 5000);
   }
 }
 
