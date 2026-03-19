@@ -1,0 +1,180 @@
+# Proposal Presets Configuration
+# Predefined configurations for common proposal writing scenarios.
+# Each preset defines section structure, persona styles, evaluation
+# criteria weights, and output preferences.
+
+presets:
+  full-proposal:
+    name: "Full Proposal Response"
+    description: "Complete proposal with all standard volumes and sections"
+    volumes:
+      - name: "Technical Approach"
+        sections:
+          - "Executive Summary"
+          - "Understanding of Requirements"
+          - "Technical Solution"
+          - "Innovation and Value-Added"
+          - "Risk Mitigation"
+        persona: "technical-authority"
+        priority: 1
+
+      - name: "Management Approach"
+        sections:
+          - "Program Management"
+          - "Staffing Plan"
+          - "Quality Assurance"
+          - "Schedule and Milestones"
+          - "Transition Plan"
+        persona: "program-manager"
+        priority: 2
+
+      - name: "Past Performance"
+        sections:
+          - "Relevant Experience"
+          - "Contract References"
+          - "Performance Metrics"
+        persona: "past-performance-narrator"
+        priority: 3
+        data_sensitivity: "high"  # Contains contract details -- local model only
+
+      - name: "Cost/Price"
+        sections:
+          - "Cost Summary"
+          - "Basis of Estimate"
+          - "Rate Justification"
+        persona: "cost-analyst"
+        priority: 4
+        data_sensitivity: "high"  # Pricing data -- local model only
+
+    evaluation_criteria:
+      technical: 0.40
+      management: 0.25
+      past_performance: 0.20
+      cost: 0.15
+
+    output:
+      format: "docx"
+      template: "/workspace/templates/full-proposal.docx"
+      draft_path: "/workspace/proposals/drafts/full"
+
+  technical-only:
+    name: "Technical Volume Only"
+    description: "Standalone technical approach for RFIs or technical evaluations"
+    volumes:
+      - name: "Technical Approach"
+        sections:
+          - "Executive Summary"
+          - "Current State Assessment"
+          - "Proposed Solution Architecture"
+          - "Implementation Methodology"
+          - "Innovation and Differentiation"
+          - "Risk Identification and Mitigation"
+          - "Tools and Technologies"
+        persona: "technical-authority"
+        priority: 1
+
+    evaluation_criteria:
+      technical_merit: 0.50
+      innovation: 0.25
+      feasibility: 0.25
+
+    output:
+      format: "docx"
+      template: "/workspace/templates/technical-volume.docx"
+      draft_path: "/workspace/proposals/drafts/technical"
+
+  past-performance-volume:
+    name: "Past Performance Volume"
+    description: "Standalone past performance narrative with contract references"
+    volumes:
+      - name: "Past Performance"
+        sections:
+          - "Corporate Experience Overview"
+          - "Contract 1 - Relevance Narrative"
+          - "Contract 2 - Relevance Narrative"
+          - "Contract 3 - Relevance Narrative"
+          - "Lessons Learned and Continuous Improvement"
+        persona: "past-performance-narrator"
+        priority: 1
+        data_sensitivity: "high"
+
+    evaluation_criteria:
+      relevance: 0.40
+      quality: 0.30
+      schedule: 0.15
+      customer_satisfaction: 0.15
+
+    output:
+      format: "docx"
+      template: "/workspace/templates/past-performance.docx"
+      draft_path: "/workspace/proposals/drafts/past-performance"
+
+  capabilities-brief:
+    name: "Capabilities Brief"
+    description: "Short-form capability statement for teaming or marketing"
+    volumes:
+      - name: "Capabilities Statement"
+        sections:
+          - "Company Overview"
+          - "Core Competencies"
+          - "Differentiators"
+          - "Past Performance Highlights"
+          - "Contact Information"
+        persona: "marketing-concise"
+        priority: 1
+
+    evaluation_criteria:
+      clarity: 0.40
+      relevance: 0.35
+      differentiation: 0.25
+
+    output:
+      format: "pdf"
+      template: "/workspace/templates/capabilities-brief.pdf"
+      draft_path: "/workspace/proposals/drafts/capabilities"
+      max_pages: 2
+
+# Default preset used when no preset is specified
+default_preset: "full-proposal"
+
+# Persona definitions referenced by presets
+personas:
+  technical-authority:
+    tone: "confident, precise, solution-oriented"
+    vocabulary: "technical but accessible"
+    perspective: "we-centered, collaborative"
+    avoid: "vague claims, unsupported assertions, passive voice"
+
+  program-manager:
+    tone: "organized, methodical, reassuring"
+    vocabulary: "management and process terminology"
+    perspective: "structured, milestone-driven"
+    avoid: "overly technical jargon, ambiguity about responsibilities"
+
+  past-performance-narrator:
+    tone: "factual, results-focused, credible"
+    vocabulary: "metrics-driven, outcome-oriented"
+    perspective: "evidence-based storytelling"
+    avoid: "exaggeration, unverifiable claims, generic statements"
+
+  cost-analyst:
+    tone: "precise, transparent, justified"
+    vocabulary: "financial and contractual"
+    perspective: "value-proposition oriented"
+    avoid: "round numbers without basis, unjustified rates"
+
+  marketing-concise:
+    tone: "compelling, concise, professional"
+    vocabulary: "accessible, impact-focused"
+    perspective: "differentiator-led"
+    avoid: "lengthy paragraphs, jargon, generic boilerplate"
+
+# Quality gates applied to all drafts before promotion
+quality_gates:
+  min_compliance_score: 0.70
+  max_passive_voice_percent: 15
+  require_evidence_per_claim: true
+  spell_check: true
+  section_length_limits:
+    min_words: 100
+    max_words: 5000

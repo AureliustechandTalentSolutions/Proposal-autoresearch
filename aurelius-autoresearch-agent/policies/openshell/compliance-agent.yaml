@@ -1,0 +1,53 @@
+# OpenShell Policy: Compliance Agent
+# This agent evaluates artifacts against compliance frameworks (NIST, CMMC, etc.).
+# It has broad read access to assess everything, but can only write score/report outputs.
+# Network is restricted to OPA for policy-as-code evaluation.
+
+agent:
+  name: "compliance-evaluator"
+  description: "Evaluates artifacts against compliance frameworks and produces scores"
+
+permissions:
+  filesystem:
+    # Full read access across the workspace -- compliance evaluation must be able
+    # to inspect any artifact, config, or learning to assess conformance.
+    read:
+      - "/workspace/**"
+    # Write limited to compliance scores and reports only.
+    # The agent cannot modify the artifacts it is evaluating.
+    write:
+      - "/workspace/compliance/scores/**"
+      - "/workspace/compliance/reports/**"
+    # Home directories off-limits; CUI read is allowed (within /workspace/**)
+    # because compliance evaluation needs to verify CUI handling procedures.
+    deny:
+      - "/home/**"
+
+  network:
+    # OPA (Open Policy Agent) for programmatic policy evaluation.
+    # Local LLM for natural-language compliance reasoning.
+    # No cloud access -- compliance data must stay local.
+    allow:
+      - "localhost:8181"  # OPA server for policy-as-code checks
+      - "localhost:11434" # Ollama local LLM for compliance reasoning
+    deny:
+      - "*"
+
+  tools:
+    # Read files for inspection, search for finding compliance-relevant content,
+    # execute for running OPA queries and validation scripts.
+    allow:
+      - "read_file"
+      - "search_learnings"
+      - "execute_code"
+      - "opa_query"
+    # No write_file -- scores are written via structured output, not raw file writes.
+    # No web browsing -- compliance checks use local policy definitions only.
+    deny:
+      - "write_file"
+      - "web_browse"
+
+  resources:
+    max_memory_mb: 4096        # 4GB -- policy evaluation can load large rulesets
+    max_cpu_percent: 100       # Full CPU -- compliance scans should complete quickly
+    max_runtime_seconds: 900   # 15 minutes -- full compliance sweep can be extensive

@@ -1,0 +1,51 @@
+# Privacy Router Configuration
+# Determines whether agent requests are routed to local or cloud models
+# based on data sensitivity, task type, and operational mode.
+# The default-local rule ensures safety: if no rule matches, stay local.
+
+routing_rules:
+  - name: "compliance-local-only"
+    condition:
+      mode: "compliance"
+      data_sensitivity: "high"
+    route: "local"
+    model: "nemotron-3-super"
+    rationale: "Compliance artifacts may contain CUI-adjacent data"
+
+  - name: "proposal-local-preferred"
+    condition:
+      mode: "proposal"
+      contains_past_performance: true
+    route: "local"
+    model: "nemotron-3-super"
+    rationale: "Past performance contains contract details"
+
+  - name: "hypothesis-cloud-allowed"
+    condition:
+      mode: "any"
+      task: "hypothesis_generation"
+      data_sensitivity: "low"
+    route: "cloud"
+    model: "claude-sonnet-4-20250514"
+    rationale: "Hypothesis generation uses abstract patterns, not sensitive data"
+
+  - name: "modification-follows-source"
+    condition:
+      task: "artifact_modification"
+    route: "inherit"
+    rationale: "Modification inherits routing from the artifact being modified"
+
+  - name: "default-local"
+    condition: {}
+    route: "local"
+    model: "nemotron-3-super"
+    rationale: "Default to local for safety"
+
+local_models:
+  primary: "nemotron-3-super"
+  fallback: "nemotron-3-omni"
+  embedding: "nemotron-embedding"
+  hardware:
+    min_vram_gb: 8
+    preferred_vram_gb: 24
+    quantization: "int4"

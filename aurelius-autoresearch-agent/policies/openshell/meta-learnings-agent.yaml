@@ -1,0 +1,55 @@
+# OpenShell Policy: Meta-Learnings Agent
+# This agent consolidates learnings from completed autoresearch loops into
+# durable meta-learnings. It reads scattered insights and produces consolidated
+# summaries. Local LLM only -- learnings may reference sensitive patterns.
+
+agent:
+  name: "meta-learnings-consolidator"
+  description: "Consolidates autoresearch loop learnings into durable meta-knowledge"
+
+permissions:
+  filesystem:
+    # Reads all learnings (raw and prior consolidated), artifacts for context,
+    # and config for consolidation rules and thresholds.
+    read:
+      - "/workspace/learnings/**"
+      - "/workspace/artifacts/**"
+      - "/workspace/config/**"
+    # Writes only to the consolidated learnings directory.
+    # Raw learnings are never modified -- consolidation is additive.
+    write:
+      - "/workspace/learnings/consolidated/**"
+    # CUI and home directories are off-limits.
+    # Proposal drafts are not relevant to meta-learning consolidation.
+    deny:
+      - "/workspace/compliance/cui/**"
+      - "/workspace/proposals/**"
+      - "/home/**"
+
+  network:
+    # Local LLM only -- consolidated learnings may encode patterns
+    # derived from sensitive artifacts (pricing strategies, win/loss analysis).
+    # No cloud access to prevent leaking competitive intelligence.
+    allow:
+      - "localhost:11434" # Ollama local LLM for summarization and synthesis
+    deny:
+      - "*"
+
+  tools:
+    # Read for gathering scattered learnings, write for saving consolidated output,
+    # search for finding thematically related learnings across loops.
+    allow:
+      - "read_file"
+      - "write_file"
+      - "search_learnings"
+      - "embedding_search"
+    # No code execution -- consolidation is a pure synthesis task.
+    # No web browsing -- all inputs are internal.
+    deny:
+      - "execute_code"
+      - "web_browse"
+
+  resources:
+    max_memory_mb: 4096        # 4GB -- embedding search and large context consolidation
+    max_cpu_percent: 50        # Moderate CPU -- consolidation is mostly LLM-bound
+    max_runtime_seconds: 1800  # 30 minutes -- thorough consolidation across many loops

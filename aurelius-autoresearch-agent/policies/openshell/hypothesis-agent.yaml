@@ -1,0 +1,53 @@
+# OpenShell Policy: Hypothesis Generator Agent
+# This agent generates improvement hypotheses for the autoresearch loop.
+# It is READ-ONLY by design -- hypotheses are evaluated before any writes occur.
+
+agent:
+  name: "hypothesis-generator"
+  description: "Generates improvement hypotheses for autoresearch loop"
+
+permissions:
+  filesystem:
+    # Read access to artifacts (past outputs), learnings (consolidated insights),
+    # and config (to understand current parameters). All read-only to ensure
+    # hypothesis generation never mutates state.
+    read:
+      - "/workspace/artifacts/**"
+      - "/workspace/learnings/**"
+      - "/workspace/config/**"
+    # No write access -- hypotheses are returned as structured output,
+    # not written directly to disk. A downstream modifier agent handles persistence.
+    write: []
+    # CUI data must never be accessible to hypothesis generation, which may
+    # route through cloud models. Home directories are off-limits to all agents.
+    deny:
+      - "/workspace/compliance/cui/**"
+      - "/home/**"
+
+  network:
+    # Local Ollama for fast, private inference; Anthropic API for higher-quality
+    # hypothesis generation when data sensitivity is low.
+    allow:
+      - "localhost:11434"       # Ollama local LLM server
+      - "api.anthropic.com:443" # Claude API for cloud-routed requests
+    # Deny-all default: no other network destinations are permitted.
+    deny:
+      - "*"
+
+  tools:
+    # Read-only tools: file reading for context, search for retrieving
+    # relevant prior learnings to inform hypothesis quality.
+    allow:
+      - "read_file"
+      - "search_learnings"
+    # Explicitly deny any tool that could mutate state or reach external resources.
+    # This ensures the hypothesis agent remains a pure "thinker" with no side effects.
+    deny:
+      - "write_file"
+      - "execute_code"
+      - "web_browse"
+
+  resources:
+    max_memory_mb: 2048       # 2GB -- sufficient for context assembly and LLM calls
+    max_cpu_percent: 50       # Moderate CPU cap; hypothesis generation is IO-bound
+    max_runtime_seconds: 300  # 5 minute hard limit prevents runaway loops

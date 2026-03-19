@@ -1,0 +1,51 @@
+# OpenShell Policy: Modifier Agent
+# This agent applies approved hypotheses by modifying artifacts.
+# Writes are restricted to a staging directory so changes can be reviewed
+# before promotion to the canonical artifact store.
+
+agent:
+  name: "artifact-modifier"
+  description: "Applies approved hypotheses by modifying artifacts in staging"
+
+permissions:
+  filesystem:
+    # Reads the current artifacts and config to understand what to change,
+    # plus learnings for context on why changes are being made.
+    read:
+      - "/workspace/artifacts/**"
+      - "/workspace/learnings/**"
+      - "/workspace/config/**"
+    # Write ONLY to staging -- never directly to production artifacts.
+    # This enforces a review gate between hypothesis and deployment.
+    write:
+      - "/workspace/staging/**"
+    # CUI data and home directories are always off-limits.
+    deny:
+      - "/workspace/compliance/cui/**"
+      - "/home/**"
+
+  network:
+    # Local Ollama for code generation and modification tasks;
+    # Anthropic API for higher-quality rewrites when privacy allows.
+    allow:
+      - "localhost:11434"       # Ollama local LLM server
+      - "api.anthropic.com:443" # Claude API for cloud-routed modification
+    deny:
+      - "*"
+
+  tools:
+    # Needs read, write, and diff tools to perform modifications.
+    # Execute is allowed for running validation scripts on staged changes.
+    allow:
+      - "read_file"
+      - "write_file"
+      - "diff_files"
+      - "execute_code"
+    # No web browsing -- modifications are based on internal context only.
+    deny:
+      - "web_browse"
+
+  resources:
+    max_memory_mb: 4096       # 4GB -- modifications may involve large file diffs
+    max_cpu_percent: 75       # Higher CPU for code transforms and validation
+    max_runtime_seconds: 600  # 10 minutes -- complex modifications need more time

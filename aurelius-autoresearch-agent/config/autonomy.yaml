@@ -1,0 +1,119 @@
+# Autonomy Configuration
+# Controls how and when the Aurelius autoresearch loop runs autonomously.
+# Includes scheduling, autonomy levels, concurrency limits, and notifications.
+
+# --- Scheduled Autonomous Tasks ---
+schedule:
+  compliance_scan:
+    cron: "0 2 * * *"            # Daily at 2:00 AM -- off-peak for full workspace scan
+    description: "Full compliance evaluation across all artifacts"
+    agent: "compliance-evaluator"
+    enabled: true
+
+  proposal_review:
+    cron: "0 8 * * 1-5"          # Weekdays at 8:00 AM -- ready for morning review
+    description: "Review and score in-progress proposal drafts"
+    agent: "proposal-persona-writer"
+    enabled: true
+
+  rfp_watch:
+    folder: "/workspace/rfps/raw"
+    poll_interval: 300           # Check every 5 minutes for new RFP uploads
+    description: "Watch for new RFP documents and trigger parsing"
+    agent: "rfp-parser"
+    enabled: true
+
+  compliance_drift:
+    cron: "0 */6 * * *"          # Every 6 hours -- catch drift before it compounds
+    description: "Detect compliance drift in modified artifacts"
+    agent: "compliance-evaluator"
+    enabled: true
+
+  learnings_consolidation:
+    cron: "0 22 * * 5"           # Friday at 10:00 PM -- weekly synthesis of the week's loops
+    description: "Consolidate weekly autoresearch learnings into meta-knowledge"
+    agent: "meta-learnings-consolidator"
+    enabled: true
+
+# --- Autonomy Levels ---
+# Each level defines how much human oversight is required.
+autonomy_levels:
+  supervised:
+    description: >
+      Every action requires explicit human approval before execution.
+      The agent proposes changes and waits for confirmation. Best for
+      initial deployment, high-stakes artifacts, or unfamiliar RFPs.
+    requires_approval:
+      - hypothesis_generation
+      - artifact_modification
+      - compliance_evaluation
+      - proposal_drafting
+      - export_rendering
+
+  guided:
+    description: >
+      Read-only and evaluation tasks run autonomously. Any task that
+      writes or modifies artifacts requires human approval. Suitable
+      for mature deployments where the loop has proven reliable.
+    requires_approval:
+      - artifact_modification
+      - proposal_drafting
+      - export_rendering
+    autonomous:
+      - hypothesis_generation
+      - compliance_evaluation
+      - learnings_consolidation
+
+  fully_autonomous:
+    description: >
+      All tasks run without human intervention. The loop generates
+      hypotheses, modifies artifacts, evaluates compliance, and
+      consolidates learnings end-to-end. Use only when the system
+      has demonstrated consistent quality over multiple supervised cycles.
+    requires_approval: []
+    autonomous:
+      - hypothesis_generation
+      - artifact_modification
+      - compliance_evaluation
+      - proposal_drafting
+      - export_rendering
+      - learnings_consolidation
+
+# --- Runtime Defaults ---
+default_level: "supervised"
+
+max_concurrent_loops: 3         # At most 3 autoresearch loops running in parallel
+
+# --- Notification Settings ---
+notifications:
+  enabled: true
+  channels:
+    - type: "email"
+      recipients:
+        - "team-lead@example.com"
+      events:
+        - "loop_completed"
+        - "approval_required"
+        - "compliance_alert"
+        - "error"
+
+    - type: "webhook"
+      url: "http://localhost:9090/hooks/aurelius"
+      events:
+        - "loop_completed"
+        - "approval_required"
+        - "compliance_alert"
+        - "error"
+        - "rfp_detected"
+
+    - type: "log"
+      path: "/workspace/logs/autonomy.log"
+      events:
+        - "*"   # Log everything for audit trail
+
+  # Escalation: if an approval request sits for too long, notify again
+  escalation:
+    reminder_after_minutes: 30
+    escalate_after_minutes: 120
+    escalation_recipients:
+      - "manager@example.com"

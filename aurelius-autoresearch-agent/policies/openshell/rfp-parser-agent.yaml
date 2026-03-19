@@ -1,0 +1,53 @@
+# OpenShell Policy: RFP Parser Agent
+# This agent parses RFP documents (PDF, DOCX) into structured data.
+# It operates in a fully air-gapped mode -- NO network access whatsoever.
+# RFPs may contain pre-decisional or source-selection-sensitive information.
+
+agent:
+  name: "rfp-parser"
+  description: "Parses RFP documents into structured requirement data"
+
+permissions:
+  filesystem:
+    # Reads raw RFP uploads and config for parsing rules/templates.
+    read:
+      - "/workspace/rfps/raw/**"
+      - "/workspace/config/**"
+    # Writes parsed, structured output to a dedicated directory.
+    write:
+      - "/workspace/rfps/parsed-rfps/**"
+    # CUI directory, home directories, and all other workspace paths
+    # are off-limits. The parser only touches its own input/output paths.
+    deny:
+      - "/workspace/compliance/cui/**"
+      - "/home/**"
+      - "/workspace/proposals/**"
+      - "/workspace/artifacts/**"
+
+  network:
+    # Completely air-gapped -- RFP content must never leave the local machine.
+    # All parsing uses local models and rule-based extraction.
+    allow: []
+    deny:
+      - "*"
+
+  tools:
+    # PDF and document extraction tools for parsing RFPs.
+    # Read/write for file IO. No code execution or web access.
+    allow:
+      - "read_file"
+      - "write_file"
+      - "pdf_extract"
+      - "docx_extract"
+      - "table_extract"
+    # No code execution -- parsing uses dedicated extraction tools only.
+    # No web browsing -- fully air-gapped by design.
+    deny:
+      - "execute_code"
+      - "web_browse"
+      - "search_learnings"
+
+  resources:
+    max_memory_mb: 4096        # 4GB -- large PDFs with embedded images need headroom
+    max_cpu_percent: 75        # PDF parsing can be CPU-intensive (OCR, table extraction)
+    max_runtime_seconds: 1800  # 30 minutes -- large multi-hundred-page RFPs take time

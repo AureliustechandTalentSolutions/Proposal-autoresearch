@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NemoClaw Security Panel</title>
+  <style>
+    /* ------------------------------------------------------------------ */
+    /* Reset & base                                                       */
+    /* ------------------------------------------------------------------ */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg-primary:    #0d0f12;
+      --bg-secondary:  #151820;
+      --bg-card:       #1a1e28;
+      --bg-input:      #232833;
+      --border:        #2a2f3d;
+      --text-primary:  #e4e6eb;
+      --text-secondary:#8b8f9a;
+      --text-muted:    #5c6070;
+      --accent-red:    #e53e3e;
+      --accent-red-dim:#9b2c2c;
+      --green:         #38a169;
+      --green-dim:     #276749;
+      --yellow:        #d69e2e;
+      --yellow-dim:    #975a16;
+      --blue:          #4299e1;
+      --blue-dim:      #2b6cb0;
+      --purple:        #9f7aea;
+      --font-mono:     'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      --font-sans:     'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --radius:        6px;
+      --shadow:        0 2px 8px rgba(0,0,0,.35);
+    }
+
+    html, body {
+      height: 100%;
+      font-family: var(--font-sans);
+      font-size: 13px;
+      color: var(--text-primary);
+      background: var(--bg-primary);
+      overflow: hidden;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Layout                                                             */
+    /* ------------------------------------------------------------------ */
+    #app {
+      display: grid;
+      grid-template-rows: 48px 1fr auto;
+      height: 100vh;
+    }
+
+    /* Top bar */
+    .top-bar {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      padding: 0 16px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .top-bar__title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--accent-red);
+      letter-spacing: .5px;
+      white-space: nowrap;
+    }
+
+    .top-bar__title span {
+      color: var(--text-secondary);
+      font-weight: 400;
+    }
+
+    .status-group {
+      display: flex;
+      gap: 18px;
+      margin-left: auto;
+      align-items: center;
+    }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .status-dot--green  { background: var(--green);  box-shadow: 0 0 6px var(--green); }
+    .status-dot--red    { background: var(--accent-red); box-shadow: 0 0 6px var(--accent-red); }
+    .status-dot--yellow { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
+
+    .stat-chip {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 3px;
+      background: var(--bg-input);
+      color: var(--text-secondary);
+    }
+
+    /* Main content columns */
+    .columns {
+      display: grid;
+      grid-template-columns: 60% 40%;
+      gap: 0;
+      overflow: hidden;
+    }
+
+    .col-left, .col-right {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .col-left  { border-right: 1px solid var(--border); }
+
+    /* Panels inside columns */
+    .panel {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .panel--grow { flex: 1 1 0; min-height: 0; }
+    .panel--half { flex: 1 1 50%; min-height: 0; }
+
+    .panel__header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 14px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .panel__title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      color: var(--text-secondary);
+    }
+
+    .panel__badge {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: var(--accent-red-dim);
+      color: var(--accent-red);
+    }
+
+    .panel__body {
+      flex: 1 1 0;
+      overflow-y: auto;
+      padding: 10px 14px;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Sandbox cards                                                      */
+    /* ------------------------------------------------------------------ */
+    .sandbox-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 10px;
+    }
+
+    .sandbox-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 12px;
+    }
+
+    .sandbox-card__head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .sandbox-card__role {
+      font-weight: 600;
+      font-size: 12px;
+    }
+
+    .sandbox-card__id {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+
+    .sandbox-card__status {
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-weight: 600;
+    }
+
+    .sandbox-card__status--running  { background: var(--green-dim);  color: var(--green); }
+    .sandbox-card__status--error    { background: var(--accent-red-dim); color: var(--accent-red); }
+
+    .resource-bar {
+      margin-top: 6px;
+    }
+
+    .resource-bar__label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-bottom: 2px;
+    }
+
+    .resource-bar__track {
+      height: 4px;
+      border-radius: 2px;
+      background: var(--bg-input);
+      overflow: hidden;
+    }
+
+    .resource-bar__fill {
+      height: 100%;
+      border-radius: 2px;
+      transition: width .3s ease;
+    }
+
+    .resource-bar__fill--mem { background: var(--blue); }
+    .resource-bar__fill--cpu { background: var(--purple); }
+
+    .btn-terminate {
+      margin-top: 8px;
+      width: 100%;
+      padding: 4px 0;
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--accent-red);
+      background: var(--accent-red-dim);
+      border: none;
+      border-radius: 3px;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+    }
+
+    .btn-terminate:hover { background: var(--accent-red); color: #fff; }
+
+    /* ------------------------------------------------------------------ */
+    /* Timeline                                                           */
+    /* ------------------------------------------------------------------ */
+    .timeline {
+      position: relative;
+      padding-left: 20px;
+    }
+
+    .timeline::before {
+      content: '';
+      position: absolute;
+      left: 6px;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: var(--border);
+    }
+
+    .timeline__event {
+      position: relative;
+      padding: 6px 0 12px;
+    }
+
+    .timeline__dot {
+      position: absolute;
+      left: -18px;
+      top: 9px;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      border: 2px solid var(--border);
+      background: var(--bg-primary);
+    }
+
+    .timeline__dot--spawn     { border-color: var(--green); background: var(--green-dim); }
+    .timeline__dot--terminate { border-color: var(--accent-red); background: var(--accent-red-dim); }
+    .timeline__dot--exec      { border-color: var(--blue); background: var(--blue-dim); }
+
+    .timeline__time {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+
+    .timeline__text {
+      font-size: 12px;
+      margin-top: 2px;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Security log                                                       */
+    /* ------------------------------------------------------------------ */
+    .security-log {
+      list-style: none;
+    }
+
+    .security-log__entry {
+      padding: 5px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+    }
+
+    .security-log__severity {
+      flex-shrink: 0;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 2px;
+      text-transform: uppercase;
+    }
+
+    .severity--info     { background: var(--green-dim);  color: var(--green); }
+    .severity--warn     { background: var(--yellow-dim); color: var(--yellow); }
+    .severity--error    { background: var(--accent-red-dim); color: var(--accent-red); }
+    .severity--critical { background: var(--accent-red); color: #fff; }
+
+    .security-log__time {
+      flex-shrink: 0;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-muted);
+      min-width: 65px;
+    }
+
+    .security-log__msg {
+      color: var(--text-primary);
+      word-break: break-word;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Privacy router                                                     */
+    /* ------------------------------------------------------------------ */
+    .router-stats {
+      display: flex;
+      gap: 14px;
+      margin-bottom: 12px;
+    }
+
+    .router-stats__item {
+      text-align: center;
+    }
+
+    .router-stats__value {
+      font-family: var(--font-mono);
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .router-stats__label {
+      font-size: 10px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+    }
+
+    .pie-chart {
+      width: 140px;
+      height: 140px;
+      margin: 0 auto 12px;
+    }
+
+    .pie-chart svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    .router-decisions {
+      list-style: none;
+    }
+
+    .router-decisions__entry {
+      padding: 4px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      display: flex;
+      gap: 6px;
+    }
+
+    .route-tag {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      padding: 1px 5px;
+      border-radius: 2px;
+      font-weight: 600;
+    }
+
+    .route--local           { background: var(--green-dim); color: var(--green); }
+    .route--federated       { background: var(--blue-dim); color: var(--blue); }
+    .route--cloud_sanitized { background: var(--yellow-dim); color: var(--yellow); }
+    .route--blocked         { background: var(--accent-red-dim); color: var(--accent-red); }
+
+    /* ------------------------------------------------------------------ */
+    /* Bottom policy editor                                               */
+    /* ------------------------------------------------------------------ */
+    .policy-panel {
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border);
+    }
+
+    .policy-panel__toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 16px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .policy-panel__toggle:hover {
+      background: var(--bg-card);
+    }
+
+    .policy-panel__label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      color: var(--text-secondary);
+    }
+
+    .policy-panel__chevron {
+      font-size: 14px;
+      color: var(--text-muted);
+      transition: transform .2s;
+    }
+
+    .policy-panel__chevron--open {
+      transform: rotate(180deg);
+    }
+
+    .policy-panel__body {
+      display: none;
+      padding: 12px 16px;
+      max-height: 280px;
+      overflow-y: auto;
+    }
+
+    .policy-panel__body--open {
+      display: block;
+    }
+
+    .policy-file-list {
+      list-style: none;
+      margin-bottom: 10px;
+    }
+
+    .policy-file-list li {
+      padding: 4px 8px;
+      border-radius: 3px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+
+    .policy-file-list li:hover,
+    .policy-file-list li.active {
+      background: var(--bg-input);
+      color: var(--text-primary);
+    }
+
+    .policy-editor {
+      width: 100%;
+      min-height: 160px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-primary);
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px;
+      resize: vertical;
+      tab-size: 2;
+    }
+
+    .policy-editor:focus {
+      outline: none;
+      border-color: var(--accent-red);
+    }
+
+    .policy-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .btn {
+      padding: 5px 14px;
+      font-size: 11px;
+      font-weight: 600;
+      border: none;
+      border-radius: 3px;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: .3px;
+    }
+
+    .btn--primary {
+      background: var(--accent-red);
+      color: #fff;
+    }
+
+    .btn--primary:hover { opacity: .85; }
+
+    .btn--secondary {
+      background: var(--bg-input);
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+    }
+
+    .btn--secondary:hover { color: var(--text-primary); }
+
+    /* ------------------------------------------------------------------ */
+    /* Scrollbar                                                          */
+    /* ------------------------------------------------------------------ */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+    /* Empty states */
+    .empty-state {
+      color: var(--text-muted);
+      font-size: 12px;
+      text-align: center;
+      padding: 20px 0;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- Top bar -->
+    <header class="top-bar">
+      <div class="top-bar__title">NemoClaw <span>Security Panel</span></div>
+      <div class="status-group">
+        <div class="status-badge" id="model-status">
+          <span class="status-dot status-dot--yellow" id="model-status-dot"></span>
+          <span id="model-status-text">Model: initializing...</span>
+        </div>
+        <div class="status-badge" id="gpu-status">
+          <span class="status-dot status-dot--yellow" id="gpu-status-dot"></span>
+          <span id="gpu-status-text">GPU: --</span>
+        </div>
+        <div class="stat-chip" id="routing-stats-chip">routes: 0 | blocked: 0</div>
+      </div>
+    </header>
+
+    <!-- Main columns -->
+    <div class="columns">
+      <!-- Left column (60%) -->
+      <div class="col-left">
+        <!-- Active Sandboxes -->
+        <div class="panel panel--half">
+          <div class="panel__header">
+            <span class="panel__title">Active Sandboxes</span>
+            <span class="panel__badge" id="sandbox-count">0</span>
+          </div>
+          <div class="panel__body">
+            <div class="sandbox-grid" id="sandbox-grid">
+              <div class="empty-state">No active sandboxes</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Agent Lifecycle Timeline -->
+        <div class="panel panel--half">
+          <div class="panel__header">
+            <span class="panel__title">Agent Lifecycle</span>
+          </div>
+          <div class="panel__body">
+            <div class="timeline" id="lifecycle-timeline">
+              <div class="empty-state">Waiting for agent events...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right column (40%) -->
+      <div class="col-right">
+        <!-- Security Log -->
+        <div class="panel panel--half">
+          <div class="panel__header">
+            <span class="panel__title">Security Log</span>
+            <span class="panel__badge" id="log-count">0</span>
+          </div>
+          <div class="panel__body" id="security-log-body">
+            <ul class="security-log" id="security-log">
+              <li class="empty-state">No events recorded</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Privacy Router -->
+        <div class="panel panel--half">
+          <div class="panel__header">
+            <span class="panel__title">Privacy Router</span>
+          </div>
+          <div class="panel__body">
+            <div class="router-stats" id="router-stats"></div>
+            <div class="pie-chart" id="router-pie-chart">
+              <svg viewBox="0 0 100 100" id="pie-svg"></svg>
+            </div>
+            <ul class="router-decisions" id="router-decisions">
+              <li class="empty-state">No routing decisions yet</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom: Collapsible Policy Editor -->
+    <div class="policy-panel" id="policy-panel">
+      <div class="policy-panel__toggle" id="policy-toggle">
+        <span class="policy-panel__label">Policy Editor</span>
+        <span class="policy-panel__chevron" id="policy-chevron">&#9660;</span>
+      </div>
+      <div class="policy-panel__body" id="policy-body">
+        <div style="display:flex; gap:14px;">
+          <div style="width:200px; flex-shrink:0;">
+            <ul class="policy-file-list" id="policy-file-list">
+              <li class="empty-state">Loading policies...</li>
+            </ul>
+          </div>
+          <div style="flex:1;">
+            <textarea class="policy-editor" id="policy-editor" placeholder="Select a policy file to edit..." readonly></textarea>
+            <div class="policy-actions">
+              <button class="btn btn--primary" id="policy-save-btn" disabled>Save &amp; Reload</button>
+              <button class="btn btn--secondary" id="policy-revert-btn" disabled>Revert</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

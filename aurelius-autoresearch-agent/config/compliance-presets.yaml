@@ -1,0 +1,123 @@
+# Compliance Presets Configuration
+# Predefined configurations for common compliance evaluation scenarios.
+# Each preset defines which frameworks to evaluate, scoring thresholds,
+# and reporting preferences.
+
+presets:
+  cmmc-level-2:
+    name: "CMMC Level 2 Assessment"
+    description: "Evaluate against CMMC Level 2 (Advanced) practices"
+    frameworks:
+      - "CMMC-2.0-L2"
+    domains:
+      - "Access Control"
+      - "Awareness and Training"
+      - "Audit and Accountability"
+      - "Configuration Management"
+      - "Identification and Authentication"
+      - "Incident Response"
+      - "Maintenance"
+      - "Media Protection"
+      - "Personnel Security"
+      - "Physical Protection"
+      - "Risk Assessment"
+      - "Security Assessment"
+      - "System and Communications Protection"
+      - "System and Information Integrity"
+    scoring:
+      pass_threshold: 0.80
+      warn_threshold: 0.60
+      scoring_method: "weighted"
+    reporting:
+      format: "detailed"
+      include_evidence: true
+      include_remediation: true
+      output_path: "/workspace/compliance/reports/cmmc-l2"
+
+  nist-800-171:
+    name: "NIST 800-171 Rev 2 Assessment"
+    description: "Evaluate against NIST SP 800-171 for CUI protection"
+    frameworks:
+      - "NIST-800-171-R2"
+    controls:
+      families:
+        - "3.1"   # Access Control
+        - "3.2"   # Awareness and Training
+        - "3.3"   # Audit and Accountability
+        - "3.4"   # Configuration Management
+        - "3.5"   # Identification and Authentication
+        - "3.6"   # Incident Response
+        - "3.7"   # Maintenance
+        - "3.8"   # Media Protection
+        - "3.9"   # Personnel Security
+        - "3.10"  # Physical Protection
+        - "3.11"  # Risk Assessment
+        - "3.12"  # Security Assessment
+        - "3.13"  # System and Communications Protection
+        - "3.14"  # System and Information Integrity
+    scoring:
+      pass_threshold: 0.85
+      warn_threshold: 0.70
+      scoring_method: "per-control"
+    reporting:
+      format: "detailed"
+      include_evidence: true
+      include_poam: true          # Plan of Action & Milestones for gaps
+      output_path: "/workspace/compliance/reports/nist-171"
+
+  far-dfars-flow-down:
+    name: "FAR/DFARS Flow-Down Check"
+    description: "Verify required FAR/DFARS clauses flow down to subcontractors"
+    frameworks:
+      - "FAR"
+      - "DFARS"
+    clauses:
+      required:
+        - "FAR 52.204-21"        # Basic Safeguarding
+        - "DFARS 252.204-7012"   # Safeguarding Covered Defense Information
+        - "DFARS 252.204-7020"   # NIST 800-171 Assessment
+        - "DFARS 252.204-7021"   # CMMC Requirements
+      check_subcontract_flow: true
+    scoring:
+      pass_threshold: 1.00       # All required clauses must be present
+      warn_threshold: 0.90
+      scoring_method: "binary-per-clause"
+    reporting:
+      format: "summary"
+      include_evidence: true
+      include_remediation: true
+      output_path: "/workspace/compliance/reports/far-dfars"
+
+  quick-scan:
+    name: "Quick Compliance Scan"
+    description: "Lightweight scan for rapid feedback during development"
+    frameworks:
+      - "CMMC-2.0-L2"
+      - "NIST-800-171-R2"
+    controls:
+      # Only check the most commonly failed controls for fast feedback
+      specific:
+        - "AC.L2-3.1.1"         # Authorized Access Control
+        - "AC.L2-3.1.2"         # Transaction & Function Control
+        - "SC.L2-3.13.1"        # Boundary Protection
+        - "SI.L2-3.14.1"        # Flaw Remediation
+    scoring:
+      pass_threshold: 0.75
+      warn_threshold: 0.50
+      scoring_method: "simple-average"
+    reporting:
+      format: "summary"
+      include_evidence: false
+      include_remediation: true
+      output_path: "/workspace/compliance/reports/quick-scan"
+
+# Default preset used when no preset is specified
+default_preset: "cmmc-level-2"
+
+# OPA policy paths for programmatic evaluation
+opa_policies:
+  base_path: "/workspace/compliance/policies"
+  bundles:
+    - "cmmc_l2.rego"
+    - "nist_171.rego"
+    - "far_dfars.rego"

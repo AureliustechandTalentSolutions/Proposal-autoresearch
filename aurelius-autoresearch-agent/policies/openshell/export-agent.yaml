@@ -1,0 +1,56 @@
+# OpenShell Policy: Export Agent
+# This agent produces final deliverable files (DOCX, XLSX, PDF) from
+# approved drafts and compliance reports. Fully air-gapped -- exports
+# may contain sensitive proposal content or compliance findings.
+
+agent:
+  name: "export-renderer"
+  description: "Renders approved drafts and reports into deliverable document formats"
+
+permissions:
+  filesystem:
+    # Reads approved drafts, compliance reports, templates, and config.
+    # These are the inputs that get assembled into final exports.
+    read:
+      - "/workspace/proposals/drafts/**"
+      - "/workspace/compliance/reports/**"
+      - "/workspace/config/**"
+      - "/workspace/templates/**"
+    # Writes only to the exports directory -- final deliverables land here.
+    write:
+      - "/workspace/exports/**"
+    # No access to raw artifacts, learnings, CUI, or home.
+    # Export agent only assembles what has already been approved.
+    deny:
+      - "/workspace/compliance/cui/**"
+      - "/workspace/artifacts/**"
+      - "/workspace/learnings/**"
+      - "/home/**"
+
+  network:
+    # Completely air-gapped -- exported documents may contain
+    # proprietary pricing, past performance, or compliance findings.
+    allow: []
+    deny:
+      - "*"
+
+  tools:
+    # Document rendering tools for producing DOCX, XLSX, and PDF output.
+    # Read for pulling source content, write for saving rendered files.
+    allow:
+      - "read_file"
+      - "write_file"
+      - "docx_render"
+      - "xlsx_render"
+      - "pdf_render"
+    # No code execution -- rendering uses dedicated document tools only.
+    # No web browsing -- fully air-gapped.
+    deny:
+      - "execute_code"
+      - "web_browse"
+      - "search_learnings"
+
+  resources:
+    max_memory_mb: 4096        # 4GB -- rendering large documents with images needs RAM
+    max_cpu_percent: 75        # Document rendering can spike CPU during layout
+    max_runtime_seconds: 900   # 15 minutes -- large proposal exports take time

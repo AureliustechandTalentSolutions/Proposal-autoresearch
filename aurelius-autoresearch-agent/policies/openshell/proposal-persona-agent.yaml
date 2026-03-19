@@ -1,0 +1,56 @@
+# OpenShell Policy: Proposal Persona Agent
+# This agent drafts proposal sections using persona-driven writing styles.
+# It reads source materials and writes drafts for human review.
+# Cloud access is allowed for non-sensitive drafting tasks via privacy router.
+
+agent:
+  name: "proposal-persona-writer"
+  description: "Drafts proposal sections using persona-driven writing styles"
+
+permissions:
+  filesystem:
+    # Reads artifacts for source material, learnings for style patterns,
+    # config for persona definitions and proposal templates.
+    read:
+      - "/workspace/artifacts/**"
+      - "/workspace/learnings/**"
+      - "/workspace/config/**"
+      - "/workspace/proposals/templates/**"
+    # Writes only to drafts -- never to final proposal outputs.
+    # Drafts go through human review before promotion.
+    write:
+      - "/workspace/proposals/drafts/**"
+    # CUI data is off-limits -- persona agent may use cloud models.
+    # Past performance data is read via artifacts but must not be
+    # passed to cloud; the privacy router enforces this.
+    deny:
+      - "/workspace/compliance/cui/**"
+      - "/home/**"
+
+  network:
+    # Local LLM for sensitive drafting (past performance, pricing).
+    # Cloud API for general writing tasks (executive summaries, technical approach).
+    allow:
+      - "localhost:11434"       # Ollama local LLM for sensitive content
+      - "api.anthropic.com:443" # Claude API for general drafting
+    deny:
+      - "*"
+
+  tools:
+    # Read for context, write for producing drafts, search for finding
+    # relevant prior proposals and learnings to improve writing quality.
+    allow:
+      - "read_file"
+      - "write_file"
+      - "search_learnings"
+      - "search_proposals"
+    # No code execution -- proposal writing is pure text generation.
+    # No web browsing -- all source material comes from internal artifacts.
+    deny:
+      - "execute_code"
+      - "web_browse"
+
+  resources:
+    max_memory_mb: 4096        # 4GB -- large context windows for proposal sections
+    max_cpu_percent: 75        # High CPU for iterative drafting and revision
+    max_runtime_seconds: 1200  # 20 minutes -- long-form writing needs time
