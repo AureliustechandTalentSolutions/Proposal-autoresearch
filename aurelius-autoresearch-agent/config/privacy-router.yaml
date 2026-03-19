@@ -3,49 +3,155 @@
 # based on data sensitivity, task type, and operational mode.
 # The default-local rule ensures safety: if no rule matches, stay local.
 
-routing_rules:
-  - name: "compliance-local-only"
-    condition:
-      mode: "compliance"
-      data_sensitivity: "high"
-    route: "local"
-    model: "nemotron-3-super"
-    rationale: "Compliance artifacts may contain CUI-adjacent data"
+# --- Default Model Identifiers ---
+defaults:
+  local_model: "nemotron:70b-q4_K_M"
+  cloud_model: "claude-sonnet-4-20250514"
 
-  - name: "proposal-local-preferred"
+# --- LLM Endpoints ---
+endpoints:
+  local:
+    ollama: "http://localhost:11434"
+    nemotron: "http://localhost:11434"
+  cloud:
+    anthropic: "https://api.anthropic.com"
+    openai: "https://api.openai.com"
+
+# --- CUI Detection Patterns ---
+# These patterns force local-only routing when detected in payloads.
+cui_detection:
+  literal_markers:
+    - "CUI"
+    - "CONTROLLED UNCLASSIFIED"
+    - "FOUO"
+    - "FOR OFFICIAL USE ONLY"
+    - "NOFORN"
+    - "//CUI"
+    - "CUI//SP-CTI"
+    - "CUI//SP-EXPT"
+    - "DISTRIBUTION STATEMENT B"
+    - "DISTRIBUTION STATEMENT C"
+    - "DISTRIBUTION STATEMENT D"
+    - "DISTRIBUTION STATEMENT E"
+    - "DISTRIBUTION STATEMENT F"
+  contract_patterns:
+    - "W911NF"    # Army Research Lab
+    - "FA8702"    # Air Force (MITRE)
+    - "FA8750"    # Air Force Research Lab
+    - "N00024"    # Navy (NAVSEA)
+    - "N00174"    # Navy (NSWC)
+    - "N66001"    # Navy (SPAWAR/NAVWAR)
+    - "DAAB07"    # Army CECOM
+    - "H98230"    # NSA
+    - "HQ0034"    # DARPA
+    - "HR0011"    # DARPA
+
+# --- PII Detection Patterns ---
+# These patterns trigger elevated sensitivity classification.
+pii_detection:
+  patterns:
+    ssn: "\\b\\d{3}-\\d{2}-\\d{4}\\b"
+    ssn_no_dash: "\\b\\d{9}\\b"
+    email: "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"
+    phone_us: "\\b(?:\\+1[-.\\s]?)?\\(?\\d{3}\\)?[-.\\s]?\\d{3}[-.\\s]?\\d{4}\\b"
+    credit_card: "\\b(?:4\\d{3}|5[1-5]\\d{2}|3[47]\\d{2}|6(?:011|5\\d{2}))[-.\\s]?\\d{4}[-.\\s]?\\d{4}[-.\\s]?\\d{4}\\b"
+    dob: "\\b(?:0[1-9]|1[0-2])/(?:0[1-9]|[12]\\d|3[01])/(?:19|20)\\d{2}\\b"
+    address: "\\b\\d{1,5}\\s+[A-Za-z]+(?:\\s+[A-Za-z]+)*\\s+(?:St|Street|Ave|Avenue|Blvd|Boulevard|Dr|Drive|Ln|Lane|Rd|Road|Ct|Court|Pl|Place|Way|Cir|Circle)\\b"
+    passport: "\\b[A-Z]\\d{8}\\b"
+    itar: "\\bITAR\\b"
+    ear: "\\bEAR\\b"
+
+# --- Classification Levels ---
+classification_levels:
+  1: "public"
+  2: "internal"
+  3: "sensitive"
+  4: "cui"
+  5: "classified"
+
+# --- Routing Rules ---
+# Evaluated in priority order (ascending). First match wins.
+rules:
+  - name: "cui_data_local"
+    priority: 1
     condition:
-      mode: "proposal"
+      contains_cui_markers: true
+    route: "local"
+    model: "nemotron:70b-q4_K_M"
+
+  - name: "past_performance_local"
+    priority: 2
+    condition:
       contains_past_performance: true
     route: "local"
-    model: "nemotron-3-super"
-    rationale: "Past performance contains contract details"
+    model: "nemotron:70b-q4_K_M"
 
-  - name: "hypothesis-cloud-allowed"
+  - name: "high_sensitivity_local"
+    priority: 3
     condition:
-      mode: "any"
-      task: "hypothesis_generation"
-      data_sensitivity: "low"
+      data_sensitivity: 4
+    route: "local"
+    model: "nemotron:70b-q4_K_M"
+
+  - name: "sensitive_data_local"
+    priority: 4
+    condition:
+      data_sensitivity: 3
+      mode: "hybrid"
+    route: "local"
+    model: "nemotron:22b-q8_0"
+
+  - name: "forced_local_mode"
+    priority: 5
+    condition:
+      mode: "local"
+    route: "local"
+    model: "nemotron:70b-q4_K_M"
+
+  - name: "cost_proposal_local"
+    priority: 6
+    condition:
+      task: "cost"
+      data_sensitivity: 3
+    route: "local"
+    model: "nemotron:70b-q4_K_M"
+
+  - name: "cloud_general_tasks"
+    priority: 10
+    condition:
+      mode: "cloud"
+      data_sensitivity: 1
     route: "cloud"
     model: "claude-sonnet-4-20250514"
-    rationale: "Hypothesis generation uses abstract patterns, not sensitive data"
 
-  - name: "modification-follows-source"
+  - name: "cloud_internal_hybrid"
+    priority: 11
     condition:
-      task: "artifact_modification"
-    route: "inherit"
-    rationale: "Modification inherits routing from the artifact being modified"
+      mode: "hybrid"
+      data_sensitivity: 2
+    route: "cloud"
+    model: "claude-sonnet-4-20250514"
 
-  - name: "default-local"
+  - name: "technical_writing_cloud"
+    priority: 12
+    condition:
+      task: "technical"
+      data_sensitivity: 1
+    route: "cloud"
+    model: "claude-sonnet-4-20250514"
+
+  - name: "default_local_safety"
+    priority: 100
     condition: {}
     route: "local"
-    model: "nemotron-3-super"
-    rationale: "Default to local for safety"
+    model: "nemotron:70b-q4_K_M"
 
+# --- Legacy compatibility fields ---
 local_models:
-  primary: "nemotron-3-super"
-  fallback: "nemotron-3-omni"
+  primary: "nemotron:70b-q4_K_M"
+  fallback: "nemotron:22b-q8_0"
   embedding: "nemotron-embedding"
   hardware:
     min_vram_gb: 8
     preferred_vram_gb: 24
-    quantization: "int4"
+    quantization: "q4_K_M"

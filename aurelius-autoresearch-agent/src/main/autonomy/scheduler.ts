@@ -265,7 +265,11 @@ export class Scheduler {
 
   /**
    * Parse a cron expression and compute milliseconds until next trigger.
-   * Simplified parser supporting: minute hour dom month dow
+   * Supports: minute hour dom month dow
+   *   - Literal values: "0 9 * * 1-5" (9:00 AM weekdays)
+   *   - Intervals: "*/30 * * * *" (every 30 min)
+   *   - Ranges: "0 9 * * 1-5" (weekdays only)
+   *   - Fixed hour+minute: "0 2 * * *" (daily at 2:00 AM)
    */
   private computeNextRunMs(cron: string): number {
     const parts = cron.split(/\s+/);
@@ -273,25 +277,82 @@ export class Scheduler {
       return 60_000; // Fallback: 1 minute
     }
 
-    const [minutePart] = parts;
+    const [minutePart, hourPart, domPart, monthPart, dowPart] = parts;
+    const now = new Date();
 
-    // Handle */N minute patterns
+    // Handle */N minute patterns (simple interval)
     if (minutePart.startsWith("*/")) {
       const interval = parseInt(minutePart.slice(2), 10);
-      return interval * 60_000;
+      return Math.max(interval * 60_000, 60_000);
     }
 
-    // Handle fixed minute (run every hour at that minute)
-    if (minutePart !== "*" && !minutePart.includes(",") && !minutePart.includes("-")) {
-      const targetMinute = parseInt(minutePart, 10);
-      const now = new Date();
-      const currentMinute = now.getMinutes();
-      let diff = targetMinute - currentMinute;
-      if (diff <= 0) diff += 60;
-      return diff * 60_000;
+    // Parse fixed minute
+    const targetMinute = minutePart === "*" ? -1 : parseInt(minutePart, 10);
+
+    // Parse hour
+    const isHourWild = hourPart === "*";
+    const targetHour = isHourWild ? -1 : parseInt(hourPart, 10);
+
+    // Parse day-of-week range (0=Sun, 1=Mon, ..., 6=Sat)
+    let allowedDows: Set<number> | null = null;
+    if (dowPart !== "*") {
+      allowedDows = new Set<number>();
+      for (const segment of dowPart.split(",")) {
+        if (segment.includes("-")) {
+          const [lo, hi] = segment.split("-").map(Number);
+          for (let d = lo; d <= hi; d++) allowedDows.add(d);
+        } else {
+          allowedDows.add(parseInt(segment, 10));
+        }
+      }
     }
 
-    // Default: run every hour
+    // Walk forward from now to find the next matching time
+    const candidate = new Date(now);
+    candidate.setSeconds(0, 0);
+
+    // Start from the next minute
+    candidate.setMinutes(candidate.getMinutes() + 1);
+
+    for (let attempts = 0; attempts < 10_080; attempts++) {
+      // 10080 minutes = 7 days
+      const dow = candidate.getDay();
+      const hour = candidate.getHours();
+      const minute = candidate.getMinutes();
+
+      const dowMatch = !allowedDows || allowedDows.has(dow);
+      const hourMatch = targetHour === -1 || hour === targetHour;
+      const minuteMatch = targetMinute === -1 || minute === targetMinute;
+
+      if (dowMatch && hourMatch && minuteMatch) {
+        const diff = candidate.getTime() - now.getTime();
+        return Math.max(diff, 1_000); // At least 1 second
+      }
+
+      // Advance by 1 minute
+      candidate.setMinutes(candidate.getMinutes() + 1);
+    }
+
+    // Fallback: 1 hour
     return 3_600_000;
+  }
+
+  /**
+   * Get a human-readable description of when a cron schedule next fires.
+   */
+  describeSchedule(entry: ScheduleEntry): string {
+    const job = this.jobs.get(entry.id);
+    if (!job) return "Not registered";
+    if (!job.entry.enabled) return "Disabled";
+    if (job.nextRun) {
+      const diff = job.nextRun - Date.now();
+      if (diff <= 0) return "Imminent";
+      const mins = Math.floor(diff / 60_000);
+      if (mins < 60) return `in ${mins}m`;
+      const hours = Math.floor(mins / 60);
+      if (hours < 24) return `in ${hours}h ${mins % 60}m`;
+      return `in ${Math.floor(hours / 24)}d ${hours % 24}h`;
+    }
+    return "Pending";
   }
 }
