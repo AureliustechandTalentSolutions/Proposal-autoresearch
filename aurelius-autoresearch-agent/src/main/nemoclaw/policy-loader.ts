@@ -6,12 +6,18 @@
  * strict Zod schemas, and provides an access-checking API that evaluates
  * filesystem glob patterns and network host:port rules.
  *
+ * Supports:
+ * - Policy inheritance (base policy + overrides per autonomy level)
+ * - Policy hot-reload via file watcher
+ * - Default sandbox policies for each autonomy level
+ *
  * Dependencies: zod, js-yaml, picomatch.
  */
 
 import { z } from "zod";
 import yaml from "js-yaml";
 import picomatch from "picomatch";
+import { watch } from "node:fs";
 
 // ---------------------------------------------------------------------------
 // Zod Schemas
@@ -19,85 +25,54 @@ import picomatch from "picomatch";
 
 /**
  * Filesystem permission rules.
- *
- * `allowed_paths` and `denied_paths` accept glob patterns (e.g. "/tmp/**").
- * `read_only_paths` is a subset of allowed paths that may only be read.
  */
 export const FilesystemPermissions = z.object({
-  /** Glob patterns for paths the agent may access. */
   allowed_paths: z.array(z.string()).default([]),
-  /** Glob patterns for paths the agent must never access. Checked first. */
   denied_paths: z.array(z.string()).default([]),
-  /** Glob patterns for paths restricted to read-only access. */
   read_only_paths: z.array(z.string()).default([]),
-  /** Maximum total disk usage in megabytes (0 = unlimited). */
   max_disk_mb: z.number().nonnegative().default(0),
 });
 
 /**
  * Network permission rules.
- *
- * Hosts are expressed as `host:port` strings. A wildcard port (`host:*`) allows
- * all ports on that host.
  */
 export const NetworkPermissions = z.object({
-  /** Whether outbound networking is permitted at all. */
   enabled: z.boolean().default(false),
-  /** Allowed destination host:port pairs. */
   allowed_hosts: z.array(z.string()).default([]),
-  /** Blocked destination host:port pairs (checked first). */
   blocked_hosts: z.array(z.string()).default([]),
-  /** Maximum outbound bandwidth in KB/s (0 = unlimited). */
   max_bandwidth_kbps: z.number().nonnegative().default(0),
 });
 
 /**
  * Tool-level permission rules.
- *
- * Each tool name maps to a boolean (allowed / denied).
  */
 export const ToolPermissions = z.object({
-  /** Explicitly allowed tool identifiers. */
   allowed_tools: z.array(z.string()).default([]),
-  /** Explicitly denied tool identifiers (checked first). */
   denied_tools: z.array(z.string()).default([]),
-  /** Whether tools not listed in either array are allowed. */
   default_allow: z.boolean().default(false),
 });
 
 /** Hard resource caps enforced by the sandbox runtime. */
 export const ResourceLimits = z.object({
-  /** Maximum memory in megabytes. */
   memory_mb: z.number().positive().default(512),
-  /** Maximum CPU cores (fractional, e.g. 0.5). */
   cpu_cores: z.number().positive().default(1),
-  /** Maximum disk usage in megabytes. */
   disk_mb: z.number().nonnegative().default(1024),
-  /** Maximum wall-clock seconds for any single task. */
   max_task_seconds: z.number().positive().default(300),
-  /** Maximum concurrent processes inside the sandbox. */
   max_processes: z.number().positive().int().default(16),
 });
 
 /** Top-level OpenShell policy document. */
 export const OpenShellPolicy = z.object({
-  /** Human-readable policy name. */
   name: z.string().min(1),
-  /** Semantic version of the policy schema (e.g. "1.0.0"). */
   version: z.string().default("1.0.0"),
-  /** Free-form description. */
   description: z.string().optional(),
-  /** Filesystem permissions. */
+  /** Optional parent policy name for inheritance. */
+  inherits: z.string().optional(),
   filesystem: FilesystemPermissions.default({}),
-  /** Network permissions. */
   network: NetworkPermissions.default({}),
-  /** Tool permissions. */
   tools: ToolPermissions.default({}),
-  /** Resource limits. */
   resource_limits: ResourceLimits.default({}),
-  /** Privacy mode: "local" forces all inference to stay on-device. */
   privacy_mode: z.enum(["local", "cloud", "hybrid"]).default("hybrid"),
-  /** Arbitrary metadata. */
   metadata: z.record(z.unknown()).optional(),
 });
 
@@ -108,14 +83,90 @@ export type OpenShellPolicyType = z.infer<typeof OpenShellPolicy>;
 // Access check types
 // ---------------------------------------------------------------------------
 
-export type AccessType = "filesystem_read" | "filesystem_write" | "network" | "tool";
+export type AccessType =
+  | "filesystem_read"
+  | "filesystem_write"
+  | "network"
+  | "tool";
 
 export interface AccessCheckResult {
-  /** Whether the access is permitted. */
   allowed: boolean;
-  /** Human-readable reason explaining the decision. */
   reason: string;
 }
+
+// ---------------------------------------------------------------------------
+// Default sandbox policies for each autonomy level
+// ---------------------------------------------------------------------------
+
+const DEFAULT_POLICIES: Record<string, Partial<z.input<typeof OpenShellPolicy>>> = {
+  "level-1-supervised": {
+    name: "level-1-supervised",
+    description: "Restrictive: no network, read-only FS, local-only LLM",
+    filesystem: {
+      allowed_paths: ["/workspace/**", "/tmp/nemoclaw-*/**"],
+      denied_paths: ["/etc/**", "/var/**", "/home/**", "/root/**", "**/.env", "**/.ssh/**"],
+      read_only_paths: ["/workspace/**"],
+      max_disk_mb: 512,
+    },
+    network: { enabled: false, allowed_hosts: [], blocked_hosts: [], max_bandwidth_kbps: 0 },
+    tools: {
+      allowed_tools: ["file_read", "file_search", "text_analysis", "compliance_check"],
+      denied_tools: ["shell_exec", "http_request", "file_write", "docker_exec"],
+      default_allow: false,
+    },
+    resource_limits: { memory_mb: 512, cpu_cores: 1, disk_mb: 512, max_task_seconds: 120, max_processes: 4 },
+    privacy_mode: "local",
+    metadata: { autonomy_level: 1, label: "supervised" },
+  },
+  "level-2-guided": {
+    name: "level-2-guided",
+    description: "Standard: whitelisted endpoints, project-scoped FS",
+    filesystem: {
+      allowed_paths: ["/workspace/**", "/tmp/nemoclaw-*/**", "/data/models/**"],
+      denied_paths: ["/etc/shadow", "/root/**", "**/.env", "**/.ssh/**"],
+      read_only_paths: ["/workspace/rfps/**", "/data/models/**"],
+      max_disk_mb: 2048,
+    },
+    network: {
+      enabled: true,
+      allowed_hosts: ["api.anthropic.com:443", "localhost:11434", "localhost:9000"],
+      blocked_hosts: ["*.onion:*", "pastebin.com:*"],
+      max_bandwidth_kbps: 10240,
+    },
+    tools: {
+      allowed_tools: ["file_read", "file_write", "file_search", "text_analysis", "compliance_check", "http_request"],
+      denied_tools: ["shell_exec", "docker_exec", "git_push"],
+      default_allow: false,
+    },
+    resource_limits: { memory_mb: 2048, cpu_cores: 2, disk_mb: 4096, max_task_seconds: 600, max_processes: 16 },
+    privacy_mode: "hybrid",
+    metadata: { autonomy_level: 2, label: "guided" },
+  },
+  "level-3-autonomous": {
+    name: "level-3-autonomous",
+    description: "Permissive but audited: broad access, full logging",
+    filesystem: {
+      allowed_paths: ["/workspace/**", "/tmp/**", "/data/**"],
+      denied_paths: ["/etc/shadow", "/root/**", "**/.ssh/id_*"],
+      read_only_paths: ["/data/models/**"],
+      max_disk_mb: 10240,
+    },
+    network: {
+      enabled: true,
+      allowed_hosts: ["api.anthropic.com:443", "api.openai.com:443", "localhost:*", "sam.gov:443"],
+      blocked_hosts: ["*.onion:*", "pastebin.com:*"],
+      max_bandwidth_kbps: 51200,
+    },
+    tools: {
+      allowed_tools: ["file_read", "file_write", "file_search", "file_delete", "text_analysis", "compliance_check", "http_request", "shell_exec"],
+      denied_tools: ["docker_exec", "git_push"],
+      default_allow: false,
+    },
+    resource_limits: { memory_mb: 8192, cpu_cores: 4, disk_mb: 20480, max_task_seconds: 1800, max_processes: 64 },
+    privacy_mode: "hybrid",
+    metadata: { autonomy_level: 3, label: "autonomous" },
+  },
+};
 
 // ---------------------------------------------------------------------------
 // PolicyLoader
@@ -123,11 +174,13 @@ export interface AccessCheckResult {
 
 /**
  * Loads, validates, and queries OpenShell security policies.
+ * Supports policy inheritance and file watching for hot-reload.
  *
  * @example
  * ```ts
  * const loader = new PolicyLoader("/etc/nemoclaw/policies");
- * const policy = await loader.load("researcher");
+ * await loader.start_watching(); // Enable hot-reload
+ * const policy = await loader.load("level-2-guided");
  * const check = loader.check_access(policy, "filesystem_read", "/data/experiment.csv");
  * if (!check.allowed) console.warn(check.reason);
  * ```
@@ -135,6 +188,12 @@ export interface AccessCheckResult {
 export class PolicyLoader {
   /** Cache of loaded and validated policies keyed by name. */
   private cache: Map<string, OpenShellPolicyType> = new Map();
+
+  /** File system watcher for hot-reload. */
+  private watcher: ReturnType<typeof watch> | null = null;
+
+  /** Registered reload handlers. */
+  private reload_handlers: Array<(name: string, policy: OpenShellPolicyType) => void> = [];
 
   /**
    * @param policy_dir Absolute path to the directory containing YAML policy files.
@@ -144,30 +203,44 @@ export class PolicyLoader {
   /**
    * Load a single policy by name.
    *
-   * The name is resolved to `<policy_dir>/<policy_name>.yaml` (the `.yaml`
-   * extension is appended automatically if missing).
-   *
-   * @param policy_name Bare name or filename of the policy.
-   * @returns Validated policy object.
-   * @throws If the file cannot be read or fails schema validation.
+   * Supports policy inheritance: if a policy has an `inherits` field,
+   * the parent policy is loaded first and the child overrides are merged.
    */
   async load(policy_name: string): Promise<OpenShellPolicyType> {
     const cached = this.cache.get(policy_name);
     if (cached) return cached;
 
-    const filename = policy_name.endsWith(".yaml") || policy_name.endsWith(".yml")
-      ? policy_name
-      : `${policy_name}.yaml`;
+    // Check if this is a default built-in policy.
+    const defaultPolicy = DEFAULT_POLICIES[policy_name];
+
+    const filename =
+      policy_name.endsWith(".yaml") || policy_name.endsWith(".yml")
+        ? policy_name
+        : `${policy_name}.yaml`;
     const full_path = `${this.policy_dir}/${filename}`;
+
+    let raw: unknown;
 
     const file = Bun.file(full_path);
     const exists = await file.exists();
-    if (!exists) {
+
+    if (exists) {
+      const text = await file.text();
+      raw = yaml.load(text);
+    } else if (defaultPolicy) {
+      // Use built-in default policy.
+      raw = defaultPolicy;
+    } else {
       throw new Error(`Policy file not found: ${full_path}`);
     }
 
-    const text = await file.text();
-    const raw = yaml.load(text);
+    // Handle inheritance.
+    const rawObj = raw as Record<string, unknown>;
+    if (rawObj.inherits && typeof rawObj.inherits === "string") {
+      const parentPolicy = await this.load(rawObj.inherits);
+      raw = this.mergePolicy(parentPolicy, rawObj);
+    }
+
     const policy = this.validate(raw);
 
     this.cache.set(policy_name, policy);
@@ -175,58 +248,120 @@ export class PolicyLoader {
   }
 
   /**
-   * Load every `.yaml` / `.yml` file in the policy directory.
-   *
-   * @returns Map of filename (sans extension) to validated policy.
+   * Load every `.yaml` / `.yml` file in the policy directory,
+   * plus all built-in default policies.
    */
   async load_all(): Promise<Map<string, OpenShellPolicyType>> {
     const results = new Map<string, OpenShellPolicyType>();
-    const glob = new Bun.Glob("*.{yaml,yml}");
 
-    for await (const entry of glob.scan({ cwd: this.policy_dir })) {
-      const name = entry.replace(/\.(yaml|yml)$/, "");
+    // Load built-in defaults first.
+    for (const [name, rawPolicy] of Object.entries(DEFAULT_POLICIES)) {
       try {
-        const policy = await this.load(name);
+        const policy = this.validate(rawPolicy);
         results.set(name, policy);
+        this.cache.set(name, policy);
       } catch (err) {
-        console.warn(`Skipping invalid policy "${entry}":`, err);
+        console.warn(`Skipping invalid default policy "${name}":`, err);
       }
+    }
+
+    // Load file-based policies (overriding defaults if same name).
+    try {
+      const glob = new Bun.Glob("*.{yaml,yml}");
+      for await (const entry of glob.scan({ cwd: this.policy_dir })) {
+        const name = entry.replace(/\.(yaml|yml)$/, "");
+        try {
+          // Clear cache to force re-read from disk.
+          this.cache.delete(name);
+          const policy = await this.load(name);
+          results.set(name, policy);
+        } catch (err) {
+          console.warn(`Skipping invalid policy "${entry}":`, err);
+        }
+      }
+    } catch (err) {
+      console.warn(
+        `[PolicyLoader] Could not scan policy directory ${this.policy_dir}:`,
+        err,
+      );
     }
 
     return results;
   }
 
   /**
+   * List all available policy names (file-based and built-in).
+   */
+  async list(): Promise<Array<{ name: string; path: string; builtin: boolean }>> {
+    const policies: Array<{ name: string; path: string; builtin: boolean }> = [];
+
+    // Built-in policies.
+    for (const name of Object.keys(DEFAULT_POLICIES)) {
+      policies.push({
+        name,
+        path: `[built-in]/${name}`,
+        builtin: true,
+      });
+    }
+
+    // File-based policies.
+    try {
+      const glob = new Bun.Glob("*.{yaml,yml}");
+      for await (const entry of glob.scan({ cwd: this.policy_dir })) {
+        const name = entry.replace(/\.(yaml|yml)$/, "");
+        // Check if it overrides a built-in.
+        const existingIdx = policies.findIndex((p) => p.name === name);
+        if (existingIdx >= 0) {
+          policies[existingIdx] = {
+            name,
+            path: `${this.policy_dir}/${entry}`,
+            builtin: false,
+          };
+        } else {
+          policies.push({
+            name,
+            path: `${this.policy_dir}/${entry}`,
+            builtin: false,
+          });
+        }
+      }
+    } catch {
+      // Directory may not exist yet.
+    }
+
+    return policies;
+  }
+
+  /**
    * Validate an unknown value against the OpenShellPolicy schema.
-   *
-   * @param policy Raw (typically YAML-parsed) value.
-   * @returns Validated policy object.
-   * @throws ZodError on validation failure.
    */
   validate(policy: unknown): OpenShellPolicyType {
     return OpenShellPolicy.parse(policy);
   }
 
   /**
+   * Get a policy for a specific autonomy level (1, 2, or 3).
+   */
+  async get_for_autonomy_level(level: number): Promise<OpenShellPolicyType> {
+    switch (level) {
+      case 1:
+        return this.load("level-1-supervised");
+      case 2:
+        return this.load("level-2-guided");
+      case 3:
+        return this.load("level-3-autonomous");
+      default:
+        return this.load("level-1-supervised"); // Default to most restrictive.
+    }
+  }
+
+  /**
    * Check whether a specific access request is permitted by a policy.
-   *
-   * Evaluation logic:
-   * - **filesystem_read / filesystem_write**: denied_paths are checked first
-   *   via glob matching. Then allowed_paths must match. For writes,
-   *   read_only_paths are additionally checked.
-   * - **network**: `blocked_hosts` checked first, then `allowed_hosts`.
-   *   Supports `host:port` and `host:*` patterns.
-   * - **tool**: `denied_tools` first, then `allowed_tools`, then `default_allow`.
-   *
-   * @param policy Validated policy object.
-   * @param access_type The category of access being requested.
-   * @param resource The specific resource (path, host:port, or tool name).
-   * @returns Whether the access is allowed and why.
    */
   check_access(
     policy: OpenShellPolicyType,
     access_type: AccessType,
-    resource: string
+    resource: string,
   ): AccessCheckResult {
     switch (access_type) {
       case "filesystem_read":
@@ -238,8 +373,102 @@ export class PolicyLoader {
       case "tool":
         return this.checkTool(policy, resource);
       default:
-        return { allowed: false, reason: `Unknown access type: ${access_type}` };
+        return {
+          allowed: false,
+          reason: `Unknown access type: ${access_type}`,
+        };
     }
+  }
+
+  /**
+   * Start watching the policy directory for changes (hot-reload).
+   * When a policy file changes, it is re-loaded, re-validated, and
+   * registered handlers are notified.
+   */
+  async start_watching(): Promise<void> {
+    if (this.watcher) return;
+
+    try {
+      this.watcher = watch(
+        this.policy_dir,
+        { recursive: false },
+        async (eventType, filename) => {
+          if (!filename) return;
+          if (!filename.endsWith(".yaml") && !filename.endsWith(".yml")) return;
+
+          const name = filename.replace(/\.(yaml|yml)$/, "");
+          console.log(
+            `[PolicyLoader] Detected ${eventType} on ${filename}; reloading...`,
+          );
+
+          // Clear cache for this policy (and any that inherit from it).
+          this.cache.delete(name);
+          this.invalidateDependents(name);
+
+          try {
+            const policy = await this.load(name);
+            console.log(
+              `[PolicyLoader] Reloaded policy "${name}" successfully.`,
+            );
+
+            // Notify handlers.
+            for (const handler of this.reload_handlers) {
+              try {
+                handler(name, policy);
+              } catch {
+                // Swallow handler errors.
+              }
+            }
+          } catch (err) {
+            console.error(
+              `[PolicyLoader] Failed to reload policy "${name}":`,
+              err,
+            );
+          }
+        },
+      );
+
+      console.log(`[PolicyLoader] Watching ${this.policy_dir} for changes.`);
+    } catch (err) {
+      console.warn(
+        `[PolicyLoader] Could not watch ${this.policy_dir}:`,
+        err,
+      );
+    }
+  }
+
+  /**
+   * Stop watching for policy changes.
+   */
+  stop_watching(): void {
+    if (this.watcher) {
+      this.watcher.close();
+      this.watcher = null;
+    }
+  }
+
+  /**
+   * Register a handler for policy reload events.
+   */
+  on_reload(
+    handler: (name: string, policy: OpenShellPolicyType) => void,
+  ): void {
+    this.reload_handlers.push(handler);
+  }
+
+  /**
+   * Clear the policy cache, forcing re-load from disk on next access.
+   */
+  clear_cache(): void {
+    this.cache.clear();
+  }
+
+  /**
+   * Clean up: stop watcher and clear cache.
+   */
+  destroy(): void {
+    this.stop_watching();
+    this.clear_cache();
   }
 
   // -----------------------------------------------------------------------
@@ -247,15 +476,60 @@ export class PolicyLoader {
   // -----------------------------------------------------------------------
 
   /**
+   * Deep merge a parent policy with child overrides.
+   * Child values take precedence. Arrays are replaced (not concatenated).
+   */
+  private mergePolicy(
+    parent: OpenShellPolicyType,
+    child: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const merged: Record<string, unknown> = { ...parent };
+
+    for (const [key, value] of Object.entries(child)) {
+      if (key === "inherits") continue; // Don't propagate the inherits field.
+
+      if (
+        value !== null &&
+        typeof value === "object" &&
+        !Array.isArray(value) &&
+        merged[key] !== null &&
+        typeof merged[key] === "object" &&
+        !Array.isArray(merged[key])
+      ) {
+        // Deep merge objects.
+        merged[key] = {
+          ...(merged[key] as Record<string, unknown>),
+          ...(value as Record<string, unknown>),
+        };
+      } else {
+        merged[key] = value;
+      }
+    }
+
+    return merged;
+  }
+
+  /**
+   * Invalidate cached policies that inherit from the given policy name.
+   */
+  private invalidateDependents(parentName: string): void {
+    for (const [name, policy] of this.cache) {
+      // Check if this policy's raw source has an `inherits` matching parentName.
+      // Since we validate on load, we rely on metadata.
+      if ((policy.metadata as any)?.inherits === parentName) {
+        this.cache.delete(name);
+        this.invalidateDependents(name); // Recursive invalidation.
+      }
+    }
+  }
+
+  /**
    * Evaluate filesystem access using glob matching.
-   *
-   * Denied paths take precedence over allowed paths. Write requests are
-   * additionally blocked if the path matches a read_only_paths pattern.
    */
   private checkFilesystem(
     policy: OpenShellPolicyType,
     path: string,
-    isWrite: boolean
+    isWrite: boolean,
   ): AccessCheckResult {
     const fs = policy.filesystem;
 
@@ -307,13 +581,10 @@ export class PolicyLoader {
 
   /**
    * Evaluate network access against host:port rules.
-   *
-   * The resource should be formatted as `host:port`. Wildcard ports (`host:*`)
-   * are supported in policy rules.
    */
   private checkNetwork(
     policy: OpenShellPolicyType,
-    resource: string
+    resource: string,
   ): AccessCheckResult {
     const net = policy.network;
 
@@ -355,7 +626,7 @@ export class PolicyLoader {
   /** Evaluate tool access. */
   private checkTool(
     policy: OpenShellPolicyType,
-    tool: string
+    tool: string,
   ): AccessCheckResult {
     const tp = policy.tools;
 
@@ -389,17 +660,22 @@ export class PolicyLoader {
 
   /**
    * Check whether a request (host, port) matches a policy rule entry.
-   * Rule entries may use `*` as a port wildcard.
+   * Rule entries may use `*` as a port or host wildcard.
    */
   private hostPortMatches(
     reqHost: string,
     reqPort: string,
-    ruleEntry: string
+    ruleEntry: string,
   ): boolean {
     const [ruleHost, rulePort] = this.parseHostPort(ruleEntry);
 
-    // Host comparison is case-insensitive.
-    if (ruleHost.toLowerCase() !== reqHost.toLowerCase()) return false;
+    // Host comparison: support wildcard prefix (e.g. "*.onion").
+    if (ruleHost.startsWith("*.")) {
+      const suffix = ruleHost.slice(1).toLowerCase(); // e.g. ".onion"
+      if (!reqHost.toLowerCase().endsWith(suffix)) return false;
+    } else {
+      if (ruleHost.toLowerCase() !== reqHost.toLowerCase()) return false;
+    }
 
     // Wildcard port matches everything.
     if (rulePort === "*") return true;

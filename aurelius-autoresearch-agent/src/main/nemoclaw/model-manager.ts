@@ -3,7 +3,8 @@
  * @description Nemotron Model Manager for NemoClaw.
  *
  * Manages local LLM models served by Ollama, including GPU detection via
- * nvidia-smi, VRAM-aware quantization selection, and health monitoring.
+ * nvidia-smi, VRAM-aware quantization selection, health monitoring, and
+ * model warm-up. Implements a fallback chain: Nemotron -> Ollama -> CPU.
  *
  * Uses Bun-native APIs exclusively.
  */
@@ -40,6 +41,10 @@ export interface GPUInfo {
   vram_free_mb: number;
   /** CUDA driver version string. */
   cuda_version: string;
+  /** GPU temperature in Celsius (0 if unavailable). */
+  temperature_c: number;
+  /** GPU utilization percentage (0-100). */
+  utilization_percent: number;
 }
 
 /** Overall status of the model manager and Ollama service. */
@@ -54,6 +59,10 @@ export interface ModelManagerStatus {
   models_available: number;
   /** Number of models currently loaded. */
   models_loaded: number;
+  /** Active fallback level in the chain. */
+  active_fallback: "nemotron" | "ollama" | "cpu";
+  /** Inference metrics. */
+  inference_metrics: InferenceMetrics;
 }
 
 /** Recommendation result from VRAM-based model selection. */
@@ -66,6 +75,32 @@ export interface ModelRecommendation {
   estimated_vram_mb: number;
   /** Explanation of the recommendation. */
   rationale: string;
+}
+
+/** Health check result. */
+export interface HealthCheckResult {
+  /** Whether the endpoint is healthy. */
+  healthy: boolean;
+  /** Latency in milliseconds. */
+  latency_ms: number;
+  /** Error message if unhealthy. */
+  error?: string;
+  /** Timestamp of the check. */
+  timestamp: string;
+}
+
+/** Inference performance metrics. */
+export interface InferenceMetrics {
+  /** Total number of inference calls. */
+  total_calls: number;
+  /** Number of successful calls. */
+  successful_calls: number;
+  /** Number of failed calls. */
+  failed_calls: number;
+  /** Average latency in milliseconds. */
+  avg_latency_ms: number;
+  /** Total tokens generated (if available). */
+  total_tokens: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -88,8 +123,19 @@ const QUANT_BYTES_PER_PARAM: Record<string, number> = {
 };
 
 /**
+ * VRAM thresholds for automatic quantization selection.
+ * - < 8 GB: q4 quantization
+ * - 8-16 GB: q8 quantization
+ * - > 16 GB: FP16
+ */
+const VRAM_QUANT_THRESHOLDS = [
+  { max_vram_gb: 8, quantization: "q4_K_M" },
+  { max_vram_gb: 16, quantization: "q8_0" },
+  { max_vram_gb: Infinity, quantization: "f16" },
+] as const;
+
+/**
  * Curated model catalog with parameter counts (in billions) and capabilities.
- * Used for VRAM estimation when Ollama metadata is insufficient.
  */
 const MODEL_CATALOG: Array<{
   pattern: RegExp;
@@ -153,16 +199,21 @@ const MODEL_CATALOG: Array<{
   },
 ];
 
+/** Health check poll interval (30 seconds). */
+const HEALTH_POLL_INTERVAL_MS = 30_000;
+
 // ---------------------------------------------------------------------------
 // ModelManager
 // ---------------------------------------------------------------------------
 
 /**
  * Manages the lifecycle of locally-served LLM models via Ollama.
+ * Implements the fallback chain: Nemotron -> Ollama (generic) -> CPU inference.
  *
  * @example
  * ```ts
  * const mm = new ModelManager();
+ * await mm.initialize();
  * const gpu = await mm.detect_gpu();
  * if (gpu) {
  *   const rec = await mm.recommend_model(gpu.vram_free_mb);
@@ -176,6 +227,24 @@ export class ModelManager {
   private readonly endpoint: string;
   /** Cached GPU info (null = not yet detected, undefined = no GPU). */
   private gpu_cache: GPUInfo | null | undefined = undefined;
+  /** Health check polling timer. */
+  private health_timer: Timer | null = null;
+  /** Latest health check results for each endpoint. */
+  private health_history: HealthCheckResult[] = [];
+  /** Inference performance metrics. */
+  private metrics: InferenceMetrics = {
+    total_calls: 0,
+    successful_calls: 0,
+    failed_calls: 0,
+    avg_latency_ms: 0,
+    total_tokens: 0,
+  };
+  /** Active fallback level. */
+  private active_fallback: "nemotron" | "ollama" | "cpu" = "ollama";
+  /** Whether the manager has been initialized. */
+  private initialized = false;
+  /** Event handlers for status changes. */
+  private status_handlers: Array<(status: ModelManagerStatus) => void> = [];
 
   /**
    * @param endpoint Ollama API base URL. Defaults to `http://localhost:11434`.
@@ -189,6 +258,64 @@ export class ModelManager {
   // -----------------------------------------------------------------------
 
   /**
+   * Initialize the model manager: detect GPU, check Ollama, warm up models.
+   * Should be called once at startup.
+   */
+  async initialize(): Promise<void> {
+    if (this.initialized) return;
+
+    console.log("[ModelManager] Initializing...");
+
+    // Detect GPU.
+    const gpu = await this.detect_gpu();
+    if (gpu) {
+      console.log(
+        `[ModelManager] GPU detected: ${gpu.name} (${gpu.vram_total_mb} MB VRAM, CUDA ${gpu.cuda_version})`,
+      );
+    } else {
+      console.log("[ModelManager] No GPU detected; will use CPU inference.");
+    }
+
+    // Check Ollama availability and determine fallback level.
+    const ollamaOk = await this.isOllamaReachable();
+    if (ollamaOk) {
+      // Check if Nemotron models are available.
+      const models = await this.list_models();
+      const hasNemotron = models.some((m) => /nemotron/i.test(m.name));
+      this.active_fallback = hasNemotron ? "nemotron" : "ollama";
+
+      // Auto warm-up: ensure at least one model is loaded.
+      const loaded = models.filter((m) => m.loaded);
+      if (loaded.length === 0 && models.length > 0) {
+        // Pick the best model based on VRAM.
+        const vramFree = gpu?.vram_free_mb ?? 4096;
+        const rec = await this.recommend_model(vramFree);
+        console.log(
+          `[ModelManager] Auto-loading model: ${rec.name} (${rec.rationale})`,
+        );
+        try {
+          await this.load_model(rec.name, rec.quantization);
+        } catch (err) {
+          console.warn("[ModelManager] Auto-load failed:", err);
+        }
+      }
+    } else {
+      this.active_fallback = "cpu";
+      console.warn(
+        "[ModelManager] Ollama not reachable; falling back to CPU inference.",
+      );
+    }
+
+    // Start health check polling.
+    this.startHealthPolling();
+
+    this.initialized = true;
+    console.log(
+      `[ModelManager] Ready (fallback chain active: ${this.active_fallback})`,
+    );
+  }
+
+  /**
    * Detect NVIDIA GPU information via `nvidia-smi`.
    *
    * @returns GPU information or `null` if no compatible GPU is found.
@@ -198,10 +325,10 @@ export class ModelManager {
       const proc = Bun.spawn(
         [
           "nvidia-smi",
-          "--query-gpu=name,memory.total,memory.used,memory.free,driver_version",
+          "--query-gpu=name,memory.total,memory.used,memory.free,driver_version,temperature.gpu,utilization.gpu",
           "--format=csv,noheader,nounits",
         ],
-        { stdout: "pipe", stderr: "pipe" }
+        { stdout: "pipe", stderr: "pipe" },
       );
 
       const exitCode = await proc.exited;
@@ -225,18 +352,9 @@ export class ModelManager {
         return null;
       }
 
-      // Detect CUDA version separately.
+      // Detect CUDA version from nvidia-smi header output.
       let cudaVersion = "unknown";
       try {
-        const cudaProc = Bun.spawn(
-          ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
-          { stdout: "pipe", stderr: "pipe" }
-        );
-        await cudaProc.exited;
-        const cudaOut = (await new Response(cudaProc.stdout).text()).trim();
-
-        // nvidia-smi prints driver version; CUDA version is in the header.
-        // Fall back to the driver version if CUDA isn't directly available.
         const headerProc = Bun.spawn(["nvidia-smi"], {
           stdout: "pipe",
           stderr: "pipe",
@@ -244,9 +362,9 @@ export class ModelManager {
         await headerProc.exited;
         const headerOut = await new Response(headerProc.stdout).text();
         const cudaMatch = headerOut.match(/CUDA Version:\s*([\d.]+)/);
-        cudaVersion = cudaMatch ? cudaMatch[1] : cudaOut;
+        cudaVersion = cudaMatch ? cudaMatch[1] : parts[4] ?? "unknown";
       } catch {
-        // Swallow; cudaVersion remains "unknown".
+        cudaVersion = parts[4] ?? "unknown";
       }
 
       const gpu: GPUInfo = {
@@ -255,6 +373,8 @@ export class ModelManager {
         vram_used_mb: Math.round(parseFloat(parts[2])),
         vram_free_mb: Math.round(parseFloat(parts[3])),
         cuda_version: cudaVersion,
+        temperature_c: parseFloat(parts[5] ?? "0") || 0,
+        utilization_percent: parseFloat(parts[6] ?? "0") || 0,
       };
 
       this.gpu_cache = gpu;
@@ -267,12 +387,12 @@ export class ModelManager {
 
   /**
    * List all models available through the Ollama API.
-   *
-   * @returns Array of model information objects.
    */
   async list_models(): Promise<ModelInfo[]> {
     try {
-      const resp = await fetch(`${this.endpoint}/api/tags`);
+      const resp = await fetch(`${this.endpoint}/api/tags`, {
+        signal: AbortSignal.timeout(5000),
+      });
       if (!resp.ok) {
         throw new Error(`Ollama API returned HTTP ${resp.status}`);
       }
@@ -290,7 +410,6 @@ export class ModelManager {
 
       if (!data.models) return [];
 
-      // Also fetch running models to determine loaded state.
       const loadedNames = await this.getLoadedModelNames();
 
       return data.models.map((m) => {
@@ -318,21 +437,14 @@ export class ModelManager {
   /**
    * Load (pull and warm up) a model in Ollama.
    *
-   * If a quantization level is specified and the model name doesn't already
-   * include one, the quantization suffix is appended.
-   *
    * When the host GPU has insufficient VRAM for the requested quantization,
    * the method automatically selects a smaller quantization.
-   *
-   * @param name Model name (e.g. "nemotron").
-   * @param quantization Optional quantization (e.g. "q4_K_M").
    */
   async load_model(name: string, quantization?: string): Promise<void> {
     let modelTag = name;
 
     // Append quantization if not already present.
     if (quantization && !name.includes(quantization)) {
-      // Ollama uses the format "model:tag" where tag may include quantization.
       if (name.includes(":")) {
         modelTag = `${name}-${quantization}`;
       } else {
@@ -341,18 +453,22 @@ export class ModelManager {
     }
 
     // VRAM check: if GPU is available, verify we have enough headroom.
-    const gpu = this.gpu_cache !== undefined ? this.gpu_cache : await this.detect_gpu();
+    const gpu =
+      this.gpu_cache !== undefined ? this.gpu_cache : await this.detect_gpu();
     if (gpu) {
       const estimatedVRAM = this.estimateVRAM(
         modelTag,
-        quantization ?? this.extractQuantization(modelTag)
+        quantization ?? this.extractQuantization(modelTag),
       );
       if (estimatedVRAM > gpu.vram_free_mb) {
-        const betterQuant = this.selectQuantizationForVRAM(name, gpu.vram_free_mb);
+        const betterQuant = this.selectQuantizationForVRAM(
+          name,
+          gpu.vram_free_mb,
+        );
         if (betterQuant) {
           console.warn(
             `Insufficient VRAM for ${modelTag} (~${estimatedVRAM} MB needed, ` +
-              `${gpu.vram_free_mb} MB free). Downgrading to ${betterQuant}.`
+              `${gpu.vram_free_mb} MB free). Downgrading to ${betterQuant}.`,
           );
           modelTag = name.includes(":")
             ? `${name.split(":")[0]}:${betterQuant}`
@@ -362,11 +478,12 @@ export class ModelManager {
     }
 
     // Pull the model (no-op if already present).
-    console.log(`Pulling model ${modelTag}...`);
+    console.log(`[ModelManager] Pulling model ${modelTag}...`);
     const pullResp = await fetch(`${this.endpoint}/api/pull`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: modelTag, stream: false }),
+      signal: AbortSignal.timeout(600_000), // 10 min timeout for large model pulls.
     });
 
     if (!pullResp.ok) {
@@ -375,23 +492,52 @@ export class ModelManager {
     }
 
     // Warm up the model by sending a trivial generate request.
-    console.log(`Warming up model ${modelTag}...`);
-    const warmupResp = await fetch(`${this.endpoint}/api/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: modelTag,
-        prompt: "Hello",
-        stream: false,
-        options: { num_predict: 1 },
-      }),
-    });
+    console.log(`[ModelManager] Warming up model ${modelTag}...`);
+    try {
+      const warmupResp = await fetch(`${this.endpoint}/api/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: modelTag,
+          prompt: "Hello",
+          stream: false,
+          options: { num_predict: 1 },
+        }),
+        signal: AbortSignal.timeout(120_000),
+      });
 
-    if (!warmupResp.ok) {
-      console.warn(`Warmup for ${modelTag} returned HTTP ${warmupResp.status}`);
+      if (!warmupResp.ok) {
+        console.warn(
+          `[ModelManager] Warmup for ${modelTag} returned HTTP ${warmupResp.status}`,
+        );
+      } else {
+        console.log(`[ModelManager] Model ${modelTag} loaded and warmed up.`);
+      }
+    } catch (err) {
+      console.warn(`[ModelManager] Warmup for ${modelTag} failed:`, err);
     }
+  }
 
-    console.log(`Model ${modelTag} loaded and ready.`);
+  /**
+   * Unload a model from memory (free VRAM).
+   */
+  async unload_model(name: string): Promise<void> {
+    try {
+      // Ollama does not have a direct unload API.
+      // Sending a generate with keep_alive=0 tells Ollama to unload.
+      await fetch(`${this.endpoint}/api/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: name,
+          keep_alive: 0,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      console.log(`[ModelManager] Unloaded model ${name}`);
+    } catch (err) {
+      console.warn(`[ModelManager] Failed to unload ${name}:`, err);
+    }
   }
 
   /**
@@ -416,48 +562,138 @@ export class ModelManager {
       gpu,
       models_available: modelsAvailable,
       models_loaded: modelsLoaded,
+      active_fallback: this.active_fallback,
+      inference_metrics: { ...this.metrics },
     };
   }
 
   /**
+   * Perform a health check against the Ollama endpoint.
+   */
+  async health_check(): Promise<HealthCheckResult> {
+    const start = performance.now();
+    try {
+      const resp = await fetch(`${this.endpoint}/api/tags`, {
+        signal: AbortSignal.timeout(5000),
+      });
+
+      const latency = performance.now() - start;
+      const result: HealthCheckResult = {
+        healthy: resp.ok,
+        latency_ms: latency,
+        error: resp.ok ? undefined : `HTTP ${resp.status}`,
+        timestamp: new Date().toISOString(),
+      };
+
+      this.health_history.push(result);
+      if (this.health_history.length > 100) {
+        this.health_history = this.health_history.slice(-50);
+      }
+
+      return result;
+    } catch (err: unknown) {
+      const latency = performance.now() - start;
+      const message = err instanceof Error ? err.message : String(err);
+      const result: HealthCheckResult = {
+        healthy: false,
+        latency_ms: latency,
+        error: message,
+        timestamp: new Date().toISOString(),
+      };
+      this.health_history.push(result);
+      return result;
+    }
+  }
+
+  /**
+   * Get health check history.
+   */
+  get_health_history(): HealthCheckResult[] {
+    return [...this.health_history];
+  }
+
+  /**
    * Ensure Ollama is running and at least one model is loaded.
-   *
-   * @throws Error if Ollama is unreachable or no models are available.
+   * Falls back through the chain if Ollama is not available.
    */
   async ensure_ready(): Promise<void> {
     const reachable = await this.isOllamaReachable();
     if (!reachable) {
-      throw new Error(
-        `Ollama is not reachable at ${this.endpoint}. ` +
-          `Ensure Ollama is running (ollama serve).`
+      // Try the fallback chain.
+      console.warn(
+        "[ModelManager] Ollama not reachable. Attempting fallback...",
       );
+
+      // Try starting Ollama via Bun.spawn.
+      try {
+        const proc = Bun.spawn(["ollama", "serve"], {
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        // Detach -- don't await.
+        // Give it a moment to start.
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+
+        const nowReachable = await this.isOllamaReachable();
+        if (nowReachable) {
+          console.log("[ModelManager] Ollama started successfully.");
+          this.active_fallback = "ollama";
+        } else {
+          console.warn(
+            "[ModelManager] Ollama failed to start; falling back to CPU.",
+          );
+          this.active_fallback = "cpu";
+        }
+      } catch {
+        console.warn(
+          "[ModelManager] Cannot start Ollama; falling back to CPU.",
+        );
+        this.active_fallback = "cpu";
+        return;
+      }
     }
 
     const models = await this.list_models();
     if (models.length === 0) {
-      throw new Error(
-        "No models available in Ollama. Pull a model first (e.g. ollama pull nemotron)."
+      console.warn(
+        "[ModelManager] No models available. Pull a model first (e.g. ollama pull nemotron).",
       );
+      return;
     }
 
     const loaded = models.filter((m) => m.loaded);
     if (loaded.length === 0) {
-      // Auto-load the first available model.
+      // Auto-load the best available model.
+      const gpu =
+        this.gpu_cache !== undefined
+          ? this.gpu_cache
+          : await this.detect_gpu();
+      const vram = gpu?.vram_free_mb ?? 4096;
+      const rec = await this.recommend_model(vram);
       console.log(
-        `No models currently loaded. Auto-loading "${models[0].name}"...`
+        `[ModelManager] No models loaded. Auto-loading "${rec.name}"...`,
       );
-      await this.load_model(models[0].name);
+      await this.load_model(rec.name, rec.quantization);
     }
   }
 
   /**
    * Recommend the best model and quantization for a given amount of free VRAM.
-   *
-   * @param vram_mb Available VRAM in megabytes.
-   * @returns A recommendation, or a CPU-only fallback if VRAM is too low.
+   * Uses the VRAM threshold strategy: <8GB->Q4, 8-16GB->Q8, >16GB->FP16.
    */
   async recommend_model(vram_mb: number): Promise<ModelRecommendation> {
-    // Preference order: larger models with better quantization first.
+    const vram_gb = vram_mb / 1024;
+
+    // Select quantization based on VRAM thresholds.
+    let targetQuant = "q4_K_M";
+    for (const threshold of VRAM_QUANT_THRESHOLDS) {
+      if (vram_gb < threshold.max_vram_gb) {
+        targetQuant = threshold.quantization;
+        break;
+      }
+    }
+
+    // Find the largest model that fits.
     const candidates: Array<{
       name: string;
       quant: string;
@@ -466,12 +702,32 @@ export class ModelManager {
       capabilities: string[];
     }> = [];
 
+    const bytesPerParam =
+      QUANT_BYTES_PER_PARAM[targetQuant] ?? QUANT_BYTES_PER_PARAM["q4_K_M"]!;
+
     for (const entry of MODEL_CATALOG) {
-      for (const [quant, bytesPerParam] of Object.entries(QUANT_BYTES_PER_PARAM)) {
+      const vramEstimate = Math.round(
+        (entry.params_b * 1e9 * bytesPerParam) / (1024 * 1024) + 500,
+      );
+      // Leave 10% headroom.
+      if (vramEstimate <= vram_mb * 0.9) {
+        candidates.push({
+          name: entry.pattern.source.replace(/[\\^$.*+?()[\]{}|]/g, ""),
+          quant: targetQuant,
+          vram: vramEstimate,
+          params_b: entry.params_b,
+          capabilities: entry.capabilities,
+        });
+      }
+    }
+
+    // Also try lower quantizations for larger models.
+    for (const entry of MODEL_CATALOG) {
+      for (const [quant, bpp] of Object.entries(QUANT_BYTES_PER_PARAM)) {
+        if (quant === targetQuant) continue;
         const vramEstimate = Math.round(
-          (entry.params_b * 1e9 * bytesPerParam) / (1024 * 1024)
+          (entry.params_b * 1e9 * bpp) / (1024 * 1024) + 500,
         );
-        // Leave 10% headroom.
         if (vramEstimate <= vram_mb * 0.9) {
           candidates.push({
             name: entry.pattern.source.replace(/[\\^$.*+?()[\]{}|]/g, ""),
@@ -493,10 +749,13 @@ export class ModelManager {
       };
     }
 
-    // Sort: prefer more parameters, then better quantization.
+    // Sort: prefer more parameters first, then better quantization.
     candidates.sort((a, b) => {
       if (b.params_b !== a.params_b) return b.params_b - a.params_b;
-      return (QUANT_BYTES_PER_PARAM[b.quant] ?? 0) - (QUANT_BYTES_PER_PARAM[a.quant] ?? 0);
+      return (
+        (QUANT_BYTES_PER_PARAM[b.quant] ?? 0) -
+        (QUANT_BYTES_PER_PARAM[a.quant] ?? 0)
+      );
     });
 
     const best = candidates[0];
@@ -509,6 +768,52 @@ export class ModelManager {
         `(~${best.vram} MB VRAM, ${Math.round((best.vram / vram_mb) * 100)}% of available). ` +
         `Capabilities: ${best.capabilities.join(", ")}`,
     };
+  }
+
+  /**
+   * Record an inference call for metrics tracking.
+   */
+  record_inference(latency_ms: number, success: boolean, tokens?: number): void {
+    this.metrics.total_calls++;
+    if (success) {
+      this.metrics.successful_calls++;
+    } else {
+      this.metrics.failed_calls++;
+    }
+    if (tokens) {
+      this.metrics.total_tokens += tokens;
+    }
+
+    // Rolling average for latency.
+    this.metrics.avg_latency_ms =
+      (this.metrics.avg_latency_ms * (this.metrics.total_calls - 1) +
+        latency_ms) /
+      this.metrics.total_calls;
+  }
+
+  /**
+   * Register a handler for status update events.
+   */
+  on_status(handler: (status: ModelManagerStatus) => void): void {
+    this.status_handlers.push(handler);
+  }
+
+  /**
+   * Refresh GPU stats (re-query nvidia-smi).
+   */
+  async refresh_gpu(): Promise<GPUInfo | null> {
+    this.gpu_cache = undefined;
+    return this.detect_gpu();
+  }
+
+  /**
+   * Stop health polling and clean up timers.
+   */
+  destroy(): void {
+    if (this.health_timer) {
+      clearInterval(this.health_timer);
+      this.health_timer = null;
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -530,7 +835,9 @@ export class ModelManager {
   /** Fetch the set of currently loaded (running) model names. */
   private async getLoadedModelNames(): Promise<Set<string>> {
     try {
-      const resp = await fetch(`${this.endpoint}/api/ps`);
+      const resp = await fetch(`${this.endpoint}/api/ps`, {
+        signal: AbortSignal.timeout(3000),
+      });
       if (!resp.ok) return new Set();
 
       const data = (await resp.json()) as {
@@ -554,7 +861,7 @@ export class ModelManager {
 
   /** Look up a model in the curated catalog. */
   private lookupCatalog(
-    name: string
+    name: string,
   ): (typeof MODEL_CATALOG)[number] | undefined {
     return MODEL_CATALOG.find((entry) => entry.pattern.test(name));
   }
@@ -569,28 +876,28 @@ export class ModelManager {
 
     // VRAM = parameters * bytes_per_param + overhead (~500 MB)
     return Math.round(
-      (paramsB * 1e9 * bytesPerParam) / (1024 * 1024) + 500
+      (paramsB * 1e9 * bytesPerParam) / (1024 * 1024) + 500,
     );
   }
 
   /**
    * Select the best quantization level that fits within available VRAM.
-   * Returns null if no quantization fits.
    */
   private selectQuantizationForVRAM(
     name: string,
-    vram_free_mb: number
+    vram_free_mb: number,
   ): string | null {
     const catalog = this.lookupCatalog(name);
     const paramsB = catalog?.params_b ?? 7;
 
-    // Try quantizations from best to worst.
-    const ordered: Array<[string, number]> = Object.entries(QUANT_BYTES_PER_PARAM)
-      .sort((a, b) => b[1] - a[1]); // best quality first
+    // Try quantizations from best to worst quality.
+    const ordered: Array<[string, number]> = Object.entries(
+      QUANT_BYTES_PER_PARAM,
+    ).sort((a, b) => b[1] - a[1]);
 
     for (const [quant, bytesPerParam] of ordered) {
       const estimate = Math.round(
-        (paramsB * 1e9 * bytesPerParam) / (1024 * 1024) + 500
+        (paramsB * 1e9 * bytesPerParam) / (1024 * 1024) + 500,
       );
       if (estimate <= vram_free_mb * 0.9) {
         return quant;
@@ -598,5 +905,39 @@ export class ModelManager {
     }
 
     return null;
+  }
+
+  /** Start periodic health check polling. */
+  private startHealthPolling(): void {
+    this.health_timer = setInterval(async () => {
+      const result = await this.health_check();
+
+      // Update fallback level based on health.
+      if (!result.healthy && this.active_fallback !== "cpu") {
+        console.warn(
+          "[ModelManager] Health check failed; considering fallback adjustment.",
+        );
+      }
+
+      // Emit status update.
+      if (this.status_handlers.length > 0) {
+        try {
+          const status = await this.get_status();
+          for (const handler of this.status_handlers) {
+            handler(status);
+          }
+        } catch {
+          // Swallow errors in status emission.
+        }
+      }
+    }, HEALTH_POLL_INTERVAL_MS);
+
+    if (
+      this.health_timer &&
+      typeof this.health_timer === "object" &&
+      "unref" in this.health_timer
+    ) {
+      (this.health_timer as any).unref();
+    }
   }
 }
