@@ -1,0 +1,31 @@
+[install]
+peer = false
+production = false
+
+[run]
+# Bun runtime configuration for the Aurelius Workbench
+smol = false
+
+[install.lockfile]
+save = true
+
+[install.scopes]
+"@aurelius" = { url = "https://npm.pkg.github.com", token = "$GITHUB_TOKEN" }
+
+[define]
+"process.env.NODE_ENV" = "'development'"
+
+[test]
+root = "./src"
+preload = ["./test/setup.ts"]
+coverage = true
+coverageReporter = ["text", "lcov"]
+coverageDir = "./coverage"
+
+[bundle]
+entrypoints = ["./src/main/index.ts"]
+outdir = "./dist"
+target = "bun"
+minify.whitespace = false
+minify.syntax = true
+minify.identifiers = false
