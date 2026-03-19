@@ -1,4 +1,7 @@
 services:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Core Application
+  # ─────────────────────────────────────────────────────────────────────────
   autoresearch:
     build:
       context: .
@@ -13,8 +16,144 @@ services:
     env_file: .env
     restart: unless-stopped
     command: python -m uvicorn dashboard.app:app --host 0.0.0.0 --port 8501
+    depends_on:
+      minio:
+        condition: service_healthy
+      opa:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - aurelius
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
-  # Optional local LLM - activate with: docker compose --profile local-llm up
+  # ─────────────────────────────────────────────────────────────────────────
+  # Trigger.dev v3 Worker
+  # ─────────────────────────────────────────────────────────────────────────
+  trigger-worker:
+    build:
+      context: ./tasks
+      dockerfile: Dockerfile
+      args:
+        NODE_VERSION: "22"
+    container_name: aurelius-trigger-worker
+    env_file: .env
+    environment:
+      TRIGGER_API_KEY: ${TRIGGER_API_KEY:-tr_dev_placeholder}
+      TRIGGER_API_URL: ${TRIGGER_API_URL:-http://localhost:3030}
+      TRIGGER_PROJECT_ID: ${TRIGGER_PROJECT_ID:-aurelius-workbench}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_USER: ${MINIO_USER:-aurelius}
+      MINIO_PASSWORD: ${MINIO_PASSWORD:-changeme123}
+      OPA_ENDPOINT: http://opa:8181
+      OLLAMA_ENDPOINT: http://ollama:11434
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: ${NODE_ENV:-development}
+    depends_on:
+      minio:
+        condition: service_healthy
+      opa:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - aurelius
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Open Policy Agent
+  # ─────────────────────────────────────────────────────────────────────────
+  opa:
+    image: openpolicyagent/opa:latest-static
+    container_name: aurelius-opa
+    ports:
+      - "${OPA_PORT:-8181}:8181"
+    volumes:
+      - ./policies:/policies
+      - ./docker/opa/config.yaml:/etc/opa/config.yaml:ro
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--config-file=/etc/opa/config.yaml"
+      - "--log-level=${OPA_LOG_LEVEL:-info}"
+      - "--log-format=json"
+      - "/policies"
+    networks:
+      - aurelius
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8181/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # MinIO Object Storage (S3-compatible)
+  # ─────────────────────────────────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: aurelius-minio
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER:-aurelius}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-changeme123}
+      MINIO_BROWSER: "on"
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - aurelius
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Redis (Trigger.dev queue backend & caching)
+  # ─────────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: aurelius-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory ${REDIS_MAXMEMORY:-256mb}
+      --maxmemory-policy allkeys-lru
+    networks:
+      - aurelius
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Ollama (Local LLM) - activate with: docker compose --profile local-llm up
+  # ─────────────────────────────────────────────────────────────────────────
   ollama:
     image: ollama/ollama:latest
     container_name: aurelius-ollama
@@ -22,7 +161,10 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     ports:
-      - "11434:11434"
+      - "${OLLAMA_PORT:-11434}:11434"
+    networks:
+      - aurelius
+    restart: unless-stopped
     deploy:
       resources:
         reservations:
@@ -30,6 +172,28 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
+# ─────────────────────────────────────────────────────────────────────────
+# Networks
+# ─────────────────────────────────────────────────────────────────────────
+networks:
+  aurelius:
+    driver: bridge
+    name: aurelius-net
+
+# ─────────────────────────────────────────────────────────────────────────
+# Volumes
+# ─────────────────────────────────────────────────────────────────────────
 volumes:
+  minio_data:
+    driver: local
+  redis_data:
+    driver: local
   ollama_data:
+    driver: local
