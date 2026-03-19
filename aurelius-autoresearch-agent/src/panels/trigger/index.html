@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Trigger - Task Queue</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg-primary:    #0d0f12;
+      --bg-secondary:  #151820;
+      --bg-card:       #1a1e28;
+      --bg-input:      #232833;
+      --border:        #2a2f3d;
+      --text-primary:  #e4e6eb;
+      --text-secondary:#8b8f9a;
+      --text-muted:    #5c6070;
+      --accent:        #d69e2e;
+      --accent-dim:    #975a16;
+      --green:         #38a169;
+      --green-dim:     #276749;
+      --red:           #e53e3e;
+      --red-dim:       #9b2c2c;
+      --blue:          #4299e1;
+      --blue-dim:      #2b6cb0;
+      --purple:        #9f7aea;
+      --font-mono:     'JetBrains Mono', 'Fira Code', monospace;
+      --font-sans:     'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --radius:        6px;
+    }
+    html, body { height: 100%; font-family: var(--font-sans); font-size: 13px; color: var(--text-primary); background: var(--bg-primary); overflow: hidden; }
+    #app { display: grid; grid-template-rows: 48px 1fr; height: 100vh; }
+
+    .top-bar { display: flex; align-items: center; gap: 16px; padding: 0 16px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
+    .top-bar__title { font-size: 15px; font-weight: 700; color: var(--accent); }
+    .top-bar__title span { color: var(--text-secondary); font-weight: 400; }
+    .status-group { display: flex; gap: 12px; margin-left: auto; align-items: center; }
+    .stat-chip { font-family: var(--font-mono); font-size: 11px; padding: 2px 8px; border-radius: 3px; background: var(--bg-input); color: var(--text-secondary); }
+    .stat-chip--active { color: var(--accent); background: var(--accent-dim); }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .status-dot--green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .status-dot--idle { background: var(--text-muted); }
+
+    .main-layout { display: grid; grid-template-columns: 1fr 350px; overflow: hidden; }
+
+    /* Task lists */
+    .task-lists { display: flex; flex-direction: column; overflow: hidden; }
+    .tab-bar { display: flex; background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
+    .tab { padding: 8px 16px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent; }
+    .tab--active { color: var(--accent); border-bottom-color: var(--accent); }
+    .tab:hover { color: var(--text-secondary); }
+    .tab__count { font-family: var(--font-mono); font-size: 10px; padding: 0 4px; border-radius: 3px; margin-left: 4px; background: var(--bg-input); }
+
+    .task-list { flex: 1; overflow-y: auto; padding: 10px; }
+    .task-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 8px; cursor: pointer; transition: border-color .15s; }
+    .task-card:hover { border-color: var(--accent); }
+    .task-card--selected { border-color: var(--accent); background: rgba(214,158,46,.05); }
+    .task-card__head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+    .task-card__type { font-weight: 600; font-size: 12px; }
+    .task-card__id { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); }
+    .task-card__meta { font-size: 11px; color: var(--text-secondary); display: flex; gap: 10px; }
+
+    .badge { display: inline-block; font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 3px; text-transform: uppercase; }
+    .badge--queued { background: var(--blue-dim); color: var(--blue); }
+    .badge--running { background: var(--accent-dim); color: var(--accent); }
+    .badge--completed { background: var(--green-dim); color: var(--green); }
+    .badge--failed { background: var(--red-dim); color: var(--red); }
+    .badge--cancelled { background: var(--bg-input); color: var(--text-muted); }
+
+    /* Detail panel */
+    .detail-panel { border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+    .detail-header { padding: 12px 14px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
+    .detail-header__title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .8px; color: var(--text-muted); }
+    .detail-body { flex: 1; overflow-y: auto; padding: 14px; }
+    .detail-field { margin-bottom: 12px; }
+    .detail-field__label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); margin-bottom: 3px; }
+    .detail-field__value { font-size: 12px; color: var(--text-primary); font-family: var(--font-mono); word-break: break-all; }
+    .detail-actions { padding: 12px 14px; border-top: 1px solid var(--border); display: flex; gap: 8px; }
+    .btn { padding: 6px 14px; font-size: 11px; font-weight: 600; border: none; border-radius: 4px; cursor: pointer; text-transform: uppercase; }
+    .btn--cancel { background: var(--red-dim); color: var(--red); }
+    .btn--cancel:hover { background: var(--red); color: #fff; }
+    .btn--retry { background: var(--blue-dim); color: var(--blue); }
+    .btn--retry:hover { background: var(--blue); color: #fff; }
+    .btn--purge { background: var(--bg-input); color: var(--text-secondary); border: 1px solid var(--border); }
+
+    .empty-state { color: var(--text-muted); font-size: 12px; text-align: center; padding: 30px 0; }
+    .conn-indicator { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-muted); }
+
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header class="top-bar">
+      <div class="top-bar__title">Trigger <span>Task Queue</span></div>
+      <div class="status-group">
+        <span class="stat-chip" id="chip-queued">Queued: 0</span>
+        <span class="stat-chip stat-chip--active" id="chip-running">Running: 0</span>
+        <span class="stat-chip" id="chip-completed">Done: 0</span>
+        <span class="stat-chip" id="chip-failed">Failed: 0</span>
+        <div class="conn-indicator">
+          <span class="status-dot status-dot--idle" id="conn-dot"></span>
+          <span id="conn-text">connecting...</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="main-layout">
+      <div class="task-lists">
+        <div class="tab-bar">
+          <div class="tab tab--active" data-filter="all">All<span class="tab__count" id="tab-all-count">0</span></div>
+          <div class="tab" data-filter="queued">Queued<span class="tab__count" id="tab-queued-count">0</span></div>
+          <div class="tab" data-filter="running">Running<span class="tab__count" id="tab-running-count">0</span></div>
+          <div class="tab" data-filter="completed">Completed<span class="tab__count" id="tab-completed-count">0</span></div>
+          <div class="tab" data-filter="failed">Failed<span class="tab__count" id="tab-failed-count">0</span></div>
+        </div>
+        <div class="task-list" id="task-list">
+          <div class="empty-state">No tasks in queue. Tasks appear when the research loop runs.</div>
+        </div>
+      </div>
+
+      <div class="detail-panel">
+        <div class="detail-header">
+          <div class="detail-header__title">Task Detail</div>
+        </div>
+        <div class="detail-body" id="detail-body">
+          <div class="empty-state">Select a task to view details</div>
+        </div>
+        <div class="detail-actions" id="detail-actions" style="display:none;">
+          <button class="btn btn--cancel" id="btn-cancel">Cancel</button>
+          <button class="btn btn--retry" id="btn-retry">Retry</button>
+          <button class="btn btn--purge" id="btn-purge">Purge Old</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      "use strict";
+
+      var ws = null, connected = false, pendingRequests = new Map();
+      var tasks = [], selectedId = null, activeFilter = "all";
+
+      function connectWS() {
+        var protocol = location.protocol === "https:" ? "wss:" : "ws:";
+        ws = new WebSocket(protocol + "//" + location.host + "/ws?panel=trigger");
+        ws.onopen = function() {
+          connected = true;
+          document.getElementById("conn-dot").className = "status-dot status-dot--green";
+          document.getElementById("conn-text").textContent = "connected";
+          refreshTasks();
+        };
+        ws.onmessage = function(ev) { try { handleMessage(JSON.parse(ev.data)); } catch(e) {} };
+        ws.onclose = function() {
+          connected = false;
+          document.getElementById("conn-dot").className = "status-dot status-dot--idle";
+          document.getElementById("conn-text").textContent = "disconnected";
+          setTimeout(connectWS, 2000);
+        };
+      }
+
+      function sendRequest(method, payload) {
+        return new Promise(function(resolve, reject) {
+          if (!ws || !connected) { reject(new Error("Not connected")); return; }
+          var id = crypto.randomUUID();
+          var msg = { id: id, type: "request", channel: "ipc:trigger", source: "trigger", target: "main", timestamp: Date.now(), method: method, payload: payload || {} };
+          var timeout = setTimeout(function() { pendingRequests.delete(id); reject(new Error("Timeout")); }, 15000);
+          pendingRequests.set(id, { resolve: resolve, reject: reject, timeout: timeout });
+          ws.send(JSON.stringify(msg));
+        });
+      }
+
+      function handleMessage(msg) {
+        if (msg.type === "reply" && msg.requestId) {
+          var p = pendingRequests.get(msg.requestId);
+          if (p) { clearTimeout(p.timeout); pendingRequests.delete(msg.requestId); msg.success ? p.resolve(msg.payload) : p.reject(new Error(msg.error)); }
+          return;
+        }
+        if (msg.type === "event" && msg.event === "task:statusChanged") {
+          updateTask(msg.payload);
+        }
+      }
+
+      function refreshTasks() {
+        sendRequest("trigger:listTasks", { limit: 200 }).then(function(data) {
+          if (data && data.data) { tasks = data.data; render(); }
+        }).catch(function() {});
+      }
+
+      function updateTask(t) {
+        var idx = tasks.findIndex(function(x) { return x.id === t.id; });
+        if (idx >= 0) tasks[idx] = t; else tasks.unshift(t);
+        render();
+      }
+
+      function render() {
+        var filtered = activeFilter === "all" ? tasks : tasks.filter(function(t) { return t.status === activeFilter; });
+        var counts = { all: tasks.length, queued: 0, running: 0, completed: 0, failed: 0 };
+        tasks.forEach(function(t) { if (counts[t.status] !== undefined) counts[t.status]++; });
+
+        document.getElementById("chip-queued").textContent = "Queued: " + counts.queued;
+        document.getElementById("chip-running").textContent = "Running: " + counts.running;
+        document.getElementById("chip-completed").textContent = "Done: " + counts.completed;
+        document.getElementById("chip-failed").textContent = "Failed: " + counts.failed;
+        document.getElementById("tab-all-count").textContent = counts.all;
+        document.getElementById("tab-queued-count").textContent = counts.queued;
+        document.getElementById("tab-running-count").textContent = counts.running;
+        document.getElementById("tab-completed-count").textContent = counts.completed;
+        document.getElementById("tab-failed-count").textContent = counts.failed;
+
+        var list = document.getElementById("task-list");
+        if (filtered.length === 0) {
+          list.innerHTML = '<div class="empty-state">No tasks matching filter.</div>';
+          return;
+        }
+
+        list.innerHTML = filtered.map(function(t) {
+          var sel = t.id === selectedId ? " task-card--selected" : "";
+          var time = t.enqueuedAt ? new Date(t.enqueuedAt).toLocaleTimeString() : "--";
+          return '<div class="task-card' + sel + '" data-id="' + t.id + '">' +
+            '<div class="task-card__head">' +
+              '<span class="task-card__type">' + esc(t.taskType) + '</span>' +
+              '<span class="badge badge--' + t.status + '">' + t.status + '</span>' +
+            '</div>' +
+            '<div class="task-card__meta">' +
+              '<span class="task-card__id">' + t.id.slice(0,8) + '</span>' +
+              '<span>' + time + '</span>' +
+              '<span>retries: ' + (t.retryCount || 0) + '/' + (t.maxRetries || 3) + '</span>' +
+            '</div></div>';
+        }).join("");
+
+        if (selectedId) renderDetail();
+      }
+
+      function renderDetail() {
+        var t = tasks.find(function(x) { return x.id === selectedId; });
+        var body = document.getElementById("detail-body");
+        var actions = document.getElementById("detail-actions");
+        if (!t) {
+          body.innerHTML = '<div class="empty-state">Select a task to view details</div>';
+          actions.style.display = "none";
+          return;
+        }
+        actions.style.display = "flex";
+        body.innerHTML =
+          field("Task ID", t.id) +
+          field("Type", t.taskType) +
+          field("Status", '<span class="badge badge--' + t.status + '">' + t.status + '</span>') +
+          field("Enqueued", t.enqueuedAt ? new Date(t.enqueuedAt).toLocaleString() : "--") +
+          field("Started", t.startedAt ? new Date(t.startedAt).toLocaleString() : "--") +
+          field("Completed", t.completedAt ? new Date(t.completedAt).toLocaleString() : "--") +
+          field("Retries", (t.retryCount || 0) + " / " + (t.maxRetries || 3)) +
+          (t.payload ? field("Payload", '<pre style="white-space:pre-wrap;font-size:10px;color:var(--text-secondary);margin:0;">' + esc(JSON.stringify(t.payload, null, 2)) + '</pre>') : "");
+      }
+
+      function field(label, value) {
+        return '<div class="detail-field"><div class="detail-field__label">' + label + '</div><div class="detail-field__value">' + value + '</div></div>';
+      }
+
+      function esc(s) { var d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+
+      // Tabs
+      document.querySelector(".tab-bar").addEventListener("click", function(e) {
+        var tab = e.target.closest(".tab");
+        if (!tab) return;
+        activeFilter = tab.dataset.filter;
+        document.querySelectorAll(".tab").forEach(function(t) { t.classList.toggle("tab--active", t.dataset.filter === activeFilter); });
+        render();
+      });
+
+      // Task selection
+      document.getElementById("task-list").addEventListener("click", function(e) {
+        var card = e.target.closest(".task-card");
+        if (!card) return;
+        selectedId = card.dataset.id;
+        render();
+      });
+
+      // Actions
+      document.getElementById("btn-cancel").addEventListener("click", function() {
+        if (!selectedId) return;
+        sendRequest("trigger:cancelTask", { taskId: selectedId }).then(function() { refreshTasks(); });
+      });
+      document.getElementById("btn-retry").addEventListener("click", function() {
+        var t = tasks.find(function(x) { return x.id === selectedId; });
+        if (!t) return;
+        sendRequest("trigger:enqueue", { taskType: t.taskType, payload: t.payload || {} }).then(function() { refreshTasks(); });
+      });
+      document.getElementById("btn-purge").addEventListener("click", function() {
+        sendRequest("trigger:purgeTasks", { maxAgeMs: 3600000 }).then(function() { selectedId = null; refreshTasks(); });
+      });
+
+      // SSE
+      var evtSource = new EventSource("/api/events?panel=trigger");
+      evtSource.addEventListener("task:statusChanged", function(e) {
+        try { updateTask(JSON.parse(e.data)); } catch(err) {}
+      });
+      evtSource.onerror = function() { evtSource.close(); setTimeout(function() { evtSource = new EventSource("/api/events?panel=trigger"); }, 5000); };
+
+      // Auto-refresh
+      setInterval(refreshTasks, 10000);
+
+      connectWS();
+    })();
+  </script>
+</body>
+</html>

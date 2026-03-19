@@ -2,6 +2,8 @@
  * IPC Message Types and Helpers
  *
  * Typed inter-process communication between panels and the main process.
+ * Provides both the message envelope types and a WebSocket-based client
+ * for panel-side use.
  */
 
 import type {
@@ -187,7 +189,7 @@ export function createEvent<T>(
     type: "event",
     channel,
     source,
-    target: "main", // Events broadcast; target is informational
+    target: "main",
     timestamp: Date.now(),
     event,
     payload,
@@ -213,4 +215,231 @@ export function isReply(msg: IPCEnvelope): msg is IPCReply {
  */
 export function isEvent(msg: IPCEnvelope): msg is IPCEvent {
   return msg.type === "event";
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket IPC Client (panel-side)
+// ---------------------------------------------------------------------------
+
+/**
+ * Client-side WebSocket IPC bridge for use in panel webviews.
+ * Handles connection, reconnection, request/response correlation,
+ * and event subscription.
+ *
+ * Usage (in a panel's app.ts):
+ * ```
+ *   const ipc = new IPCClient("maestro");
+ *   await ipc.connect();
+ *   const status = await ipc.request("maestro:status", {});
+ *   ipc.on("loop:statusChanged", (data) => { ... });
+ * ```
+ */
+export class IPCClient {
+  private ws: WebSocket | null = null;
+  private panelId: PanelId;
+  private pendingRequests: Map<string, {
+    resolve: (value: unknown) => void;
+    reject: (reason: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }> = new Map();
+  private eventHandlers: Map<string, Set<(data: unknown) => void>> = new Map();
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectDelay = 1000;
+  private maxReconnectDelay = 30000;
+  private requestTimeout = 30000;
+  private connected = false;
+  private _onConnect: (() => void) | null = null;
+  private _onDisconnect: (() => void) | null = null;
+
+  constructor(panelId: PanelId) {
+    this.panelId = panelId;
+  }
+
+  /**
+   * Connect to the main process WebSocket server.
+   */
+  connect(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      const wsUrl = `${protocol}//${location.host}/ws?panel=${this.panelId}`;
+
+      try {
+        this.ws = new WebSocket(wsUrl);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+
+      this.ws.onopen = () => {
+        this.connected = true;
+        this.reconnectDelay = 1000;
+        console.log(`[IPC] Connected as ${this.panelId}`);
+        if (this._onConnect) this._onConnect();
+        resolve();
+      };
+
+      this.ws.onmessage = (ev) => {
+        this.handleMessage(ev.data);
+      };
+
+      this.ws.onclose = () => {
+        this.connected = false;
+        console.log("[IPC] Disconnected");
+        if (this._onDisconnect) this._onDisconnect();
+        this.scheduleReconnect();
+      };
+
+      this.ws.onerror = (err) => {
+        if (!this.connected) {
+          reject(new Error("WebSocket connection failed"));
+        }
+      };
+    });
+  }
+
+  /**
+   * Disconnect from the server.
+   */
+  disconnect(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this.connected = false;
+
+    // Reject all pending requests
+    for (const [id, pending] of this.pendingRequests) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("Disconnected"));
+    }
+    this.pendingRequests.clear();
+  }
+
+  /**
+   * Send an RPC request and wait for the response.
+   */
+  request<T = unknown>(method: string, payload: unknown = {}): Promise<T> {
+    return new Promise((resolve, reject) => {
+      if (!this.ws || !this.connected) {
+        reject(new Error("Not connected"));
+        return;
+      }
+
+      const msg = createRequest(this.panelId, "main", `ipc:${method.split(":")[0]}`, method, payload);
+
+      const timeout = setTimeout(() => {
+        this.pendingRequests.delete(msg.id);
+        reject(new Error(`Request timeout: ${method}`));
+      }, this.requestTimeout);
+
+      this.pendingRequests.set(msg.id, {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        timeout,
+      });
+
+      this.ws.send(JSON.stringify(msg));
+    });
+  }
+
+  /**
+   * Subscribe to events from the main process.
+   */
+  on(event: string, handler: (data: unknown) => void): () => void {
+    if (!this.eventHandlers.has(event)) {
+      this.eventHandlers.set(event, new Set());
+    }
+    this.eventHandlers.get(event)!.add(handler);
+    return () => this.eventHandlers.get(event)?.delete(handler);
+  }
+
+  /**
+   * Set a callback for when the connection is established.
+   */
+  onConnect(fn: () => void): void {
+    this._onConnect = fn;
+  }
+
+  /**
+   * Set a callback for when the connection is lost.
+   */
+  onDisconnect(fn: () => void): void {
+    this._onDisconnect = fn;
+  }
+
+  /**
+   * Check if the client is currently connected.
+   */
+  isConnected(): boolean {
+    return this.connected;
+  }
+
+  private handleMessage(data: string): void {
+    try {
+      const envelope = JSON.parse(data) as IPCEnvelope;
+
+      // Handle reply (response to a request)
+      if (envelope.type === "reply") {
+        const reply = envelope as IPCReply;
+        const pending = this.pendingRequests.get(reply.requestId);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          this.pendingRequests.delete(reply.requestId);
+          if (reply.success) {
+            pending.resolve(reply.payload);
+          } else {
+            pending.reject(new Error(reply.error ?? "Request failed"));
+          }
+        }
+        return;
+      }
+
+      // Handle event
+      if (envelope.type === "event") {
+        const event = envelope as IPCEvent;
+        const handlers = this.eventHandlers.get(event.event);
+        if (handlers) {
+          for (const handler of handlers) {
+            try {
+              handler(event.payload);
+            } catch (err) {
+              console.error(`[IPC] Event handler error for ${event.event}:`, err);
+            }
+          }
+        }
+
+        // Also dispatch to wildcard handlers
+        const wildcardHandlers = this.eventHandlers.get("*");
+        if (wildcardHandlers) {
+          for (const handler of wildcardHandlers) {
+            try {
+              handler({ event: event.event, data: event.payload });
+            } catch (err) {
+              console.error("[IPC] Wildcard handler error:", err);
+            }
+          }
+        }
+        return;
+      }
+    } catch {
+      // Ignore malformed messages
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer) return;
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.maxReconnectDelay);
+      console.log(`[IPC] Reconnecting in ${this.reconnectDelay}ms...`);
+      this.connect().catch(() => {
+        // Will retry via onclose handler
+      });
+    }, this.reconnectDelay);
+  }
 }

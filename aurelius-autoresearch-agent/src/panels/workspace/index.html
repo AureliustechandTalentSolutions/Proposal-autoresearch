@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Workspace & Artifacts</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg-primary:    #0d0f12;
+      --bg-secondary:  #151820;
+      --bg-card:       #1a1e28;
+      --bg-input:      #232833;
+      --border:        #2a2f3d;
+      --text-primary:  #e4e6eb;
+      --text-secondary:#8b8f9a;
+      --text-muted:    #5c6070;
+      --accent:        #9f7aea;
+      --accent-dim:    #6b46c1;
+      --green:         #38a169;
+      --green-dim:     #276749;
+      --red:           #e53e3e;
+      --red-dim:       #9b2c2c;
+      --yellow:        #d69e2e;
+      --blue:          #4299e1;
+      --blue-dim:      #2b6cb0;
+      --font-mono:     'JetBrains Mono', 'Fira Code', monospace;
+      --font-sans:     'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --radius:        6px;
+    }
+    html, body { height: 100%; font-family: var(--font-sans); font-size: 13px; color: var(--text-primary); background: var(--bg-primary); overflow: hidden; }
+    #app { display: grid; grid-template-rows: 48px 1fr; height: 100vh; }
+
+    .top-bar { display: flex; align-items: center; gap: 16px; padding: 0 16px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
+    .top-bar__title { font-size: 15px; font-weight: 700; color: var(--accent); }
+    .top-bar__title span { color: var(--text-secondary); font-weight: 400; }
+    .status-group { display: flex; gap: 12px; margin-left: auto; align-items: center; }
+    .stat-chip { font-family: var(--font-mono); font-size: 11px; padding: 2px 8px; border-radius: 3px; background: var(--bg-input); color: var(--text-secondary); }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .status-dot--green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .status-dot--idle { background: var(--text-muted); }
+
+    .main-layout { display: grid; grid-template-columns: 280px 1fr; overflow: hidden; }
+
+    /* Sidebar - bucket/file browser */
+    .sidebar { border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+    .sidebar__header { padding: 10px 14px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+    .sidebar__title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .8px; color: var(--text-muted); margin-bottom: 6px; }
+
+    .bucket-list { list-style: none; margin-bottom: 8px; }
+    .bucket-item { padding: 6px 12px; font-size: 12px; cursor: pointer; border-radius: 3px; display: flex; align-items: center; gap: 8px; color: var(--text-secondary); }
+    .bucket-item:hover { background: var(--bg-input); color: var(--text-primary); }
+    .bucket-item--active { background: var(--accent-dim); color: var(--accent); }
+    .bucket-icon { font-size: 14px; width: 18px; text-align: center; }
+
+    .file-list-area { flex: 1; overflow-y: auto; padding: 8px; }
+    .file-item { padding: 5px 10px; font-size: 11px; font-family: var(--font-mono); cursor: pointer; border-radius: 3px; display: flex; justify-content: space-between; align-items: center; color: var(--text-secondary); }
+    .file-item:hover { background: var(--bg-input); color: var(--text-primary); }
+    .file-item--selected { background: rgba(159,122,234,.1); color: var(--accent); }
+    .file-size { font-size: 10px; color: var(--text-muted); }
+
+    /* Content area */
+    .content-area { display: flex; flex-direction: column; overflow: hidden; }
+    .content-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+    .content-path { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
+    .content-actions { display: flex; gap: 6px; }
+
+    .btn { padding: 5px 12px; font-size: 10px; font-weight: 600; border: none; border-radius: 3px; cursor: pointer; text-transform: uppercase; letter-spacing: .3px; }
+    .btn--download { background: var(--blue-dim); color: var(--blue); }
+    .btn--download:hover { background: var(--blue); color: #fff; }
+    .btn--delete { background: var(--red-dim); color: var(--red); }
+    .btn--delete:hover { background: var(--red); color: #fff; }
+    .btn--export { background: var(--accent-dim); color: var(--accent); }
+    .btn--export:hover { background: var(--accent); color: #fff; }
+    .btn--refresh { background: var(--bg-input); color: var(--text-secondary); border: 1px solid var(--border); }
+
+    .content-body { flex: 1; overflow: auto; padding: 14px; }
+    .file-viewer { font-family: var(--font-mono); font-size: 12px; color: var(--text-primary); white-space: pre-wrap; word-break: break-word; line-height: 1.6; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; min-height: 200px; }
+    .file-meta { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 11px; margin-bottom: 14px; }
+    .file-meta dt { color: var(--text-muted); font-weight: 600; text-transform: uppercase; font-size: 10px; }
+    .file-meta dd { color: var(--text-secondary); font-family: var(--font-mono); }
+
+    .empty-state { color: var(--text-muted); font-size: 12px; text-align: center; padding: 40px 0; }
+    .conn-indicator { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-muted); }
+
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header class="top-bar">
+      <div class="top-bar__title">Workspace <span>Artifacts</span></div>
+      <div class="status-group">
+        <button class="btn btn--refresh" id="btn-refresh">Refresh</button>
+        <button class="btn btn--export" id="btn-export-all">Export All</button>
+        <span class="stat-chip" id="chip-files">Files: 0</span>
+        <span class="stat-chip" id="chip-bucket">Bucket: --</span>
+        <div class="conn-indicator">
+          <span class="status-dot status-dot--idle" id="conn-dot"></span>
+          <span id="conn-text">connecting...</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="main-layout">
+      <!-- Sidebar: Bucket & File Browser -->
+      <div class="sidebar">
+        <div class="sidebar__header">
+          <div class="sidebar__title">Buckets</div>
+          <ul class="bucket-list" id="bucket-list">
+            <li class="bucket-item bucket-item--active" data-bucket="proposals"><span class="bucket-icon">&#128193;</span> proposals</li>
+            <li class="bucket-item" data-bucket="compliance-artifacts"><span class="bucket-icon">&#128196;</span> compliance-artifacts</li>
+            <li class="bucket-item" data-bucket="rfp-inbox"><span class="bucket-icon">&#128229;</span> rfp-inbox</li>
+            <li class="bucket-item" data-bucket="volumes"><span class="bucket-icon">&#128214;</span> volumes</li>
+            <li class="bucket-item" data-bucket="exports"><span class="bucket-icon">&#128230;</span> exports</li>
+            <li class="bucket-item" data-bucket="hypotheses"><span class="bucket-icon">&#128161;</span> hypotheses</li>
+            <li class="bucket-item" data-bucket="scores"><span class="bucket-icon">&#128200;</span> scores</li>
+            <li class="bucket-item" data-bucket="templates"><span class="bucket-icon">&#128221;</span> templates</li>
+          </ul>
+        </div>
+        <div class="sidebar__header" style="border-bottom: none;">
+          <div class="sidebar__title">Files</div>
+        </div>
+        <div class="file-list-area" id="file-list-area">
+          <div class="empty-state">Select a bucket to browse files</div>
+        </div>
+      </div>
+
+      <!-- Content: File Viewer -->
+      <div class="content-area">
+        <div class="content-header">
+          <span class="content-path" id="content-path">No file selected</span>
+          <div class="content-actions" id="content-actions" style="display:none;">
+            <button class="btn btn--download" id="btn-download">Download</button>
+            <button class="btn btn--delete" id="btn-delete">Delete</button>
+          </div>
+        </div>
+        <div class="content-body" id="content-body">
+          <div class="empty-state">Select a file from the sidebar to view its contents.<br><br>Artifacts include proposals, compliance documents, RFPs, volumes, and generated exports.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      "use strict";
+
+      var ws = null, connected = false, pendingRequests = new Map();
+      var currentBucket = "proposals", currentFile = null, files = [];
+
+      function connectWS() {
+        var protocol = location.protocol === "https:" ? "wss:" : "ws:";
+        ws = new WebSocket(protocol + "//" + location.host + "/ws?panel=workspace");
+        ws.onopen = function() {
+          connected = true;
+          document.getElementById("conn-dot").className = "status-dot status-dot--green";
+          document.getElementById("conn-text").textContent = "connected";
+          listFiles(currentBucket);
+        };
+        ws.onmessage = function(ev) { try { handleMessage(JSON.parse(ev.data)); } catch(e) {} };
+        ws.onclose = function() {
+          connected = false;
+          document.getElementById("conn-dot").className = "status-dot status-dot--idle";
+          document.getElementById("conn-text").textContent = "disconnected";
+          setTimeout(connectWS, 2000);
+        };
+      }
+
+      function sendRequest(method, payload) {
+        return new Promise(function(resolve, reject) {
+          if (!ws || !connected) { reject(new Error("Not connected")); return; }
+          var id = crypto.randomUUID();
+          var msg = { id: id, type: "request", channel: "ipc:workspace", source: "workspace", target: "main", timestamp: Date.now(), method: method, payload: payload || {} };
+          var timeout = setTimeout(function() { pendingRequests.delete(id); reject(new Error("Timeout")); }, 15000);
+          pendingRequests.set(id, { resolve: resolve, reject: reject, timeout: timeout });
+          ws.send(JSON.stringify(msg));
+        });
+      }
+
+      function handleMessage(msg) {
+        if (msg.type === "reply" && msg.requestId) {
+          var p = pendingRequests.get(msg.requestId);
+          if (p) { clearTimeout(p.timeout); pendingRequests.delete(msg.requestId); msg.success ? p.resolve(msg.payload) : p.reject(new Error(msg.error)); }
+          return;
+        }
+        if (msg.type === "event") {
+          if (msg.event === "rfp:detected") {
+            if (currentBucket === "rfp-inbox") listFiles(currentBucket);
+          }
+        }
+      }
+
+      function listFiles(bucket) {
+        currentBucket = bucket;
+        document.getElementById("chip-bucket").textContent = "Bucket: " + bucket;
+
+        sendRequest("minio:list", { bucket: bucket, maxKeys: 500 }).then(function(data) {
+          if (data && data.data) {
+            files = data.data;
+            renderFiles();
+          }
+        }).catch(function() {
+          // Show demo files if MinIO isn't available
+          files = getDemoFiles(bucket);
+          renderFiles();
+        });
+      }
+
+      function getDemoFiles(bucket) {
+        var demos = {
+          proposals: [
+            { key: "draft-v3.md", size: 24576, lastModified: Date.now() - 3600000, contentType: "text/markdown" },
+            { key: "executive-summary.md", size: 8192, lastModified: Date.now() - 7200000, contentType: "text/markdown" },
+            { key: "technical-approach.md", size: 32768, lastModified: Date.now() - 1800000, contentType: "text/markdown" },
+            { key: "past-performance.md", size: 16384, lastModified: Date.now() - 86400000, contentType: "text/markdown" },
+          ],
+          "compliance-artifacts": [
+            { key: "ssp-2024.pdf", size: 512000, lastModified: Date.now() - 172800000, contentType: "application/pdf" },
+            { key: "poam-q1-2025.xlsx", size: 45000, lastModified: Date.now() - 259200000, contentType: "application/xlsx" },
+            { key: "nist-controls-matrix.json", size: 128000, lastModified: Date.now() - 86400000, contentType: "application/json" },
+          ],
+          "rfp-inbox": [
+            { key: "RFP-2025-DOD-001.pdf", size: 2048000, lastModified: Date.now() - 43200000, contentType: "application/pdf" },
+          ],
+          volumes: [
+            { key: "vol-1-technical.md", size: 65536, lastModified: Date.now() - 3600000, contentType: "text/markdown" },
+            { key: "vol-2-management.md", size: 49152, lastModified: Date.now() - 7200000, contentType: "text/markdown" },
+          ],
+          exports: [],
+          hypotheses: [
+            { key: "run-001/hypothesis-0.json", size: 4096, lastModified: Date.now() - 1800000, contentType: "application/json" },
+            { key: "run-001/hypothesis-1.json", size: 3500, lastModified: Date.now() - 900000, contentType: "application/json" },
+          ],
+          scores: [
+            { key: "run-001/score-0.json", size: 2048, lastModified: Date.now() - 1700000, contentType: "application/json" },
+            { key: "run-001/score-1.json", size: 2100, lastModified: Date.now() - 800000, contentType: "application/json" },
+          ],
+          templates: [
+            { key: "dod-proposal-template.md", size: 12288, lastModified: Date.now() - 604800000, contentType: "text/markdown" },
+          ],
+        };
+        return demos[bucket] || [];
+      }
+
+      function renderFiles() {
+        document.getElementById("chip-files").textContent = "Files: " + files.length;
+        var area = document.getElementById("file-list-area");
+        if (files.length === 0) {
+          area.innerHTML = '<div class="empty-state">No files in this bucket</div>';
+          return;
+        }
+        area.innerHTML = files.map(function(f) {
+          var sel = currentFile && currentFile.key === f.key ? " file-item--selected" : "";
+          return '<div class="file-item' + sel + '" data-key="' + esc(f.key) + '">' +
+            '<span>' + esc(f.key) + '</span>' +
+            '<span class="file-size">' + formatSize(f.size) + '</span>' +
+          '</div>';
+        }).join("");
+      }
+
+      function viewFile(key) {
+        var file = files.find(function(f) { return f.key === key; });
+        if (!file) return;
+        currentFile = file;
+        renderFiles();
+
+        document.getElementById("content-path").textContent = currentBucket + "/" + key;
+        document.getElementById("content-actions").style.display = "flex";
+
+        var body = document.getElementById("content-body");
+        body.innerHTML =
+          '<dl class="file-meta">' +
+            '<dt>Key</dt><dd>' + esc(file.key) + '</dd>' +
+            '<dt>Size</dt><dd>' + formatSize(file.size) + '</dd>' +
+            '<dt>Type</dt><dd>' + esc(file.contentType || "unknown") + '</dd>' +
+            '<dt>Modified</dt><dd>' + (file.lastModified ? new Date(file.lastModified).toLocaleString() : "--") + '</dd>' +
+            '<dt>Bucket</dt><dd>' + esc(currentBucket) + '</dd>' +
+          '</dl>' +
+          '<div class="file-viewer" id="file-content">Loading...</div>';
+
+        // Try to fetch content
+        sendRequest("minio:download", { bucket: currentBucket, key: key }).then(function(data) {
+          if (data && data.data) {
+            var content = typeof data.data === "string" ? data.data : JSON.stringify(data.data, null, 2);
+            document.getElementById("file-content").textContent = content;
+          }
+        }).catch(function() {
+          document.getElementById("file-content").textContent = "[Content preview unavailable - MinIO not connected]\n\nThis file would contain the artifact stored at:\n  " + currentBucket + "/" + key;
+        });
+      }
+
+      function formatSize(bytes) {
+        if (!bytes) return "0 B";
+        var units = ["B", "KB", "MB", "GB"];
+        var i = 0;
+        while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+        return bytes.toFixed(i > 0 ? 1 : 0) + " " + units[i];
+      }
+
+      function esc(s) { var d = document.createElement("div"); d.textContent = s || ""; return d.innerHTML; }
+
+      // Bucket selection
+      document.getElementById("bucket-list").addEventListener("click", function(e) {
+        var item = e.target.closest(".bucket-item");
+        if (!item) return;
+        document.querySelectorAll(".bucket-item").forEach(function(b) { b.classList.remove("bucket-item--active"); });
+        item.classList.add("bucket-item--active");
+        currentFile = null;
+        document.getElementById("content-path").textContent = "No file selected";
+        document.getElementById("content-actions").style.display = "none";
+        document.getElementById("content-body").innerHTML = '<div class="empty-state">Select a file to view</div>';
+        listFiles(item.dataset.bucket);
+      });
+
+      // File selection
+      document.getElementById("file-list-area").addEventListener("click", function(e) {
+        var item = e.target.closest(".file-item");
+        if (!item) return;
+        viewFile(item.dataset.key);
+      });
+
+      // Actions
+      document.getElementById("btn-download").addEventListener("click", function() {
+        if (!currentFile) return;
+        // In production, this would trigger a file save dialog
+        alert("Download: " + currentBucket + "/" + currentFile.key);
+      });
+
+      document.getElementById("btn-delete").addEventListener("click", function() {
+        if (!currentFile) return;
+        if (!confirm("Delete " + currentFile.key + "?")) return;
+        sendRequest("minio:delete", { bucket: currentBucket, key: currentFile.key }).then(function() {
+          currentFile = null;
+          listFiles(currentBucket);
+          document.getElementById("content-body").innerHTML = '<div class="empty-state">File deleted</div>';
+          document.getElementById("content-actions").style.display = "none";
+        }).catch(function() {});
+      });
+
+      document.getElementById("btn-refresh").addEventListener("click", function() { listFiles(currentBucket); });
+      document.getElementById("btn-export-all").addEventListener("click", function() {
+        alert("Export package would be generated from all artifacts in the workspace.");
+      });
+
+      // SSE
+      var evtSource = new EventSource("/api/events?panel=workspace");
+      evtSource.addEventListener("rfp:detected", function(e) {
+        if (currentBucket === "rfp-inbox") listFiles(currentBucket);
+      });
+      evtSource.onerror = function() { evtSource.close(); setTimeout(function() { evtSource = new EventSource("/api/events?panel=workspace"); }, 5000); };
+
+      connectWS();
+    })();
+  </script>
+</body>
+</html>

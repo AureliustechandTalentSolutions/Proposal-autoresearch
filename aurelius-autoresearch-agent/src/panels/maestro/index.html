@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Maestro - Research Loop</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg-primary:    #0d0f12;
+      --bg-secondary:  #151820;
+      --bg-card:       #1a1e28;
+      --bg-input:      #232833;
+      --border:        #2a2f3d;
+      --text-primary:  #e4e6eb;
+      --text-secondary:#8b8f9a;
+      --text-muted:    #5c6070;
+      --accent:        #4299e1;
+      --accent-dim:    #2b6cb0;
+      --green:         #38a169;
+      --green-dim:     #276749;
+      --red:           #e53e3e;
+      --red-dim:       #9b2c2c;
+      --yellow:        #d69e2e;
+      --yellow-dim:    #975a16;
+      --purple:        #9f7aea;
+      --font-mono:     'JetBrains Mono', 'Fira Code', monospace;
+      --font-sans:     'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --radius:        6px;
+    }
+
+    html, body { height: 100%; font-family: var(--font-sans); font-size: 13px; color: var(--text-primary); background: var(--bg-primary); overflow: hidden; }
+
+    #app { display: grid; grid-template-rows: 48px 1fr; height: 100vh; }
+
+    /* Top bar */
+    .top-bar { display: flex; align-items: center; gap: 16px; padding: 0 16px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
+    .top-bar__title { font-size: 15px; font-weight: 700; color: var(--accent); letter-spacing: .5px; }
+    .top-bar__title span { color: var(--text-secondary); font-weight: 400; }
+    .status-group { display: flex; gap: 14px; margin-left: auto; align-items: center; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .status-dot--green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .status-dot--red { background: var(--red); box-shadow: 0 0 6px var(--red); }
+    .status-dot--yellow { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
+    .status-dot--idle { background: var(--text-muted); }
+    .stat-chip { font-family: var(--font-mono); font-size: 11px; padding: 2px 8px; border-radius: 3px; background: var(--bg-input); color: var(--text-secondary); }
+
+    /* Main layout */
+    .main-layout { display: grid; grid-template-columns: 300px 1fr; grid-template-rows: 1fr 1fr; overflow: hidden; }
+
+    /* Controls panel */
+    .controls { grid-row: 1 / 3; border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow-y: auto; }
+    .controls__section { padding: 14px; border-bottom: 1px solid var(--border); }
+    .controls__label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .8px; color: var(--text-muted); margin-bottom: 8px; }
+
+    /* Buttons */
+    .btn { padding: 7px 16px; font-size: 11px; font-weight: 600; border: none; border-radius: 4px; cursor: pointer; text-transform: uppercase; letter-spacing: .3px; transition: opacity .15s; }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .btn--start { background: var(--green); color: #fff; }
+    .btn--start:hover:not(:disabled) { background: #2f8a5b; }
+    .btn--pause { background: var(--yellow); color: #000; }
+    .btn--stop { background: var(--red); color: #fff; }
+    .btn--advance { background: var(--accent); color: #fff; }
+    .btn-group { display: flex; gap: 6px; flex-wrap: wrap; }
+
+    /* Inputs */
+    .input-group { margin-bottom: 10px; }
+    .input-group label { display: block; font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+    .input-group input, .input-group select { width: 100%; padding: 6px 10px; font-size: 12px; font-family: var(--font-mono); color: var(--text-primary); background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); }
+    .input-group input:focus, .input-group select:focus { outline: none; border-color: var(--accent); }
+
+    /* Score chart area */
+    .chart-panel { border-bottom: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+    .panel__header { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+    .panel__title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .8px; color: var(--text-secondary); }
+    .panel__badge { font-family: var(--font-mono); font-size: 10px; padding: 1px 6px; border-radius: 3px; background: var(--accent-dim); color: var(--accent); }
+    .chart-body { flex: 1; padding: 10px; display: flex; align-items: center; justify-content: center; min-height: 0; }
+    .chart-svg { width: 100%; height: 100%; }
+
+    /* Iteration history */
+    .history-panel { display: flex; flex-direction: column; overflow: hidden; }
+    .history-body { flex: 1; overflow-y: auto; padding: 0; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    thead { position: sticky; top: 0; background: var(--bg-secondary); z-index: 1; }
+    th { padding: 8px 10px; text-align: left; font-weight: 600; color: var(--text-muted); text-transform: uppercase; font-size: 10px; letter-spacing: .5px; border-bottom: 1px solid var(--border); }
+    td { padding: 7px 10px; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
+    tr:hover td { background: var(--bg-card); }
+
+    .badge { display: inline-block; font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 3px; text-transform: uppercase; letter-spacing: .3px; }
+    .badge--keep { background: var(--green-dim); color: var(--green); }
+    .badge--discard { background: var(--red-dim); color: var(--red); }
+
+    .phase-indicator { display: flex; gap: 3px; align-items: center; }
+    .phase-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border); }
+    .phase-dot--active { background: var(--accent); box-shadow: 0 0 4px var(--accent); }
+    .phase-dot--done { background: var(--green); }
+
+    .score-cell { font-family: var(--font-mono); }
+    .score--up { color: var(--green); }
+    .score--down { color: var(--red); }
+    .score--neutral { color: var(--text-muted); }
+
+    .empty-state { color: var(--text-muted); font-size: 12px; text-align: center; padding: 30px 0; }
+
+    /* Autonomy selector */
+    .autonomy-selector { display: flex; gap: 4px; }
+    .autonomy-btn { padding: 5px 10px; font-size: 10px; font-weight: 600; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; background: var(--bg-input); color: var(--text-secondary); transition: all .15s; }
+    .autonomy-btn--active { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+
+    /* Connection indicator */
+    .conn-indicator { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-muted); }
+
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- Top bar -->
+    <header class="top-bar">
+      <div class="top-bar__title">Maestro <span>Research Loop</span></div>
+      <div class="status-group">
+        <div class="phase-indicator" id="phase-indicators">
+          <span class="phase-dot" data-phase="hypothesis" title="Hypothesis"></span>
+          <span class="phase-dot" data-phase="modify" title="Modify"></span>
+          <span class="phase-dot" data-phase="score" title="Score"></span>
+          <span class="phase-dot" data-phase="review" title="Review"></span>
+          <span class="phase-dot" data-phase="export" title="Export"></span>
+        </div>
+        <span class="stat-chip" id="cycle-chip">Cycle 0/0</span>
+        <span class="stat-chip" id="phase-chip">idle</span>
+        <div class="conn-indicator">
+          <span class="status-dot status-dot--idle" id="conn-dot"></span>
+          <span id="conn-text">connecting...</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main layout -->
+    <div class="main-layout">
+      <!-- Left: Controls -->
+      <div class="controls">
+        <div class="controls__section">
+          <div class="controls__label">Run Controls</div>
+          <div class="btn-group" style="margin-bottom: 10px;">
+            <button class="btn btn--start" id="btn-start">Start</button>
+            <button class="btn btn--pause" id="btn-pause" disabled>Pause</button>
+            <button class="btn btn--stop" id="btn-stop" disabled>Stop</button>
+            <button class="btn btn--advance" id="btn-advance" disabled>Step</button>
+          </div>
+        </div>
+
+        <div class="controls__section">
+          <div class="controls__label">Configuration</div>
+          <div class="input-group">
+            <label for="input-cycles">Total Cycles</label>
+            <input type="number" id="input-cycles" value="10" min="1" max="100" />
+          </div>
+          <div class="input-group">
+            <label for="input-artifact">Target Artifact</label>
+            <input type="text" id="input-artifact" placeholder="proposals/draft.md" />
+          </div>
+        </div>
+
+        <div class="controls__section">
+          <div class="controls__label">Autonomy Level</div>
+          <div class="autonomy-selector" id="autonomy-selector">
+            <button class="autonomy-btn autonomy-btn--active" data-level="supervised">Supervised</button>
+            <button class="autonomy-btn" data-level="guided">Guided</button>
+            <button class="autonomy-btn" data-level="fully_autonomous">Full Auto</button>
+          </div>
+        </div>
+
+        <div class="controls__section">
+          <div class="controls__label">Status</div>
+          <div style="font-size: 11px; color: var(--text-secondary); line-height: 1.6;">
+            <div>Running: <span id="status-running" style="font-family: var(--font-mono);">false</span></div>
+            <div>Phase: <span id="status-phase" style="font-family: var(--font-mono);">idle</span></div>
+            <div>Cycle: <span id="status-cycle" style="font-family: var(--font-mono);">0/0</span></div>
+            <div>Errors: <span id="status-errors" style="font-family: var(--font-mono);">0</span></div>
+            <div>Started: <span id="status-started" style="font-family: var(--font-mono);">--</span></div>
+            <div>Last Complete: <span id="status-last" style="font-family: var(--font-mono);">--</span></div>
+          </div>
+        </div>
+
+        <div class="controls__section" style="flex: 1;">
+          <div class="controls__label">Notifications</div>
+          <div id="notification-log" style="font-size: 11px; color: var(--text-muted); max-height: 200px; overflow-y: auto;">
+            <div class="empty-state">No notifications</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Top right: Score trajectory chart -->
+      <div class="chart-panel">
+        <div class="panel__header">
+          <span class="panel__title">Score Trajectory</span>
+          <span class="panel__badge" id="current-score">0.0000</span>
+        </div>
+        <div class="chart-body">
+          <svg class="chart-svg" id="score-chart" viewBox="0 0 600 200" preserveAspectRatio="none">
+            <!-- Grid lines -->
+            <line x1="0" y1="50" x2="600" y2="50" stroke="#2a2f3d" stroke-width="0.5" stroke-dasharray="4" />
+            <line x1="0" y1="100" x2="600" y2="100" stroke="#2a2f3d" stroke-width="0.5" stroke-dasharray="4" />
+            <line x1="0" y1="150" x2="600" y2="150" stroke="#2a2f3d" stroke-width="0.5" stroke-dasharray="4" />
+            <!-- Y-axis labels -->
+            <text x="4" y="14" fill="#5c6070" font-size="9" font-family="monospace">1.0</text>
+            <text x="4" y="54" fill="#5c6070" font-size="9" font-family="monospace">0.75</text>
+            <text x="4" y="104" fill="#5c6070" font-size="9" font-family="monospace">0.50</text>
+            <text x="4" y="154" fill="#5c6070" font-size="9" font-family="monospace">0.25</text>
+            <text x="4" y="198" fill="#5c6070" font-size="9" font-family="monospace">0.0</text>
+            <!-- Score line (drawn by JS) -->
+            <polyline id="score-line" fill="none" stroke="#4299e1" stroke-width="2" points="" />
+            <!-- Score dots (drawn by JS) -->
+            <g id="score-dots"></g>
+            <!-- Threshold line -->
+            <line id="threshold-line" x1="0" y1="0" x2="600" y2="0" stroke="#38a169" stroke-width="1" stroke-dasharray="6,3" opacity="0" />
+          </svg>
+        </div>
+      </div>
+
+      <!-- Bottom right: Iteration history -->
+      <div class="history-panel">
+        <div class="panel__header">
+          <span class="panel__title">Iteration History</span>
+          <span class="panel__badge" id="iteration-count">0</span>
+        </div>
+        <div class="history-body">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Hypothesis</th>
+                <th>Before</th>
+                <th>After</th>
+                <th>Delta</th>
+                <th>Decision</th>
+                <th>Duration</th>
+              </tr>
+            </thead>
+            <tbody id="iteration-tbody">
+              <tr><td colspan="7" class="empty-state">No iterations yet. Start a research loop.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // -----------------------------------------------------------------------
+    // Maestro Panel Application
+    // -----------------------------------------------------------------------
+    (function() {
+      "use strict";
+
+      // -- State --
+      let ws = null;
+      let connected = false;
+      let pendingRequests = new Map();
+      let selectedAutonomy = "supervised";
+      let scores = [];
+      let iterations = [];
+      let loopStatus = {
+        running: false, currentCycle: 0, totalCycles: 0,
+        phase: "idle", startedAt: null, lastCompletedAt: null,
+        autonomyLevel: "supervised", errorCount: 0,
+      };
+
+      // -- DOM refs --
+      const connDot = document.getElementById("conn-dot");
+      const connText = document.getElementById("conn-text");
+      const btnStart = document.getElementById("btn-start");
+      const btnPause = document.getElementById("btn-pause");
+      const btnStop = document.getElementById("btn-stop");
+      const btnAdvance = document.getElementById("btn-advance");
+      const inputCycles = document.getElementById("input-cycles");
+      const inputArtifact = document.getElementById("input-artifact");
+      const cycleChip = document.getElementById("cycle-chip");
+      const phaseChip = document.getElementById("phase-chip");
+      const currentScoreBadge = document.getElementById("current-score");
+      const iterationCount = document.getElementById("iteration-count");
+      const iterationTbody = document.getElementById("iteration-tbody");
+      const scoreLine = document.getElementById("score-line");
+      const scoreDots = document.getElementById("score-dots");
+      const notificationLog = document.getElementById("notification-log");
+
+      // -- WebSocket IPC --
+      function connectWS() {
+        const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+        ws = new WebSocket(protocol + "//" + location.host + "/ws?panel=maestro");
+
+        ws.onopen = function() {
+          connected = true;
+          connDot.className = "status-dot status-dot--green";
+          connText.textContent = "connected";
+          requestStatus();
+        };
+
+        ws.onmessage = function(ev) {
+          try {
+            var msg = JSON.parse(ev.data);
+            handleMessage(msg);
+          } catch(e) {}
+        };
+
+        ws.onclose = function() {
+          connected = false;
+          connDot.className = "status-dot status-dot--red";
+          connText.textContent = "disconnected";
+          setTimeout(connectWS, 2000);
+        };
+
+        ws.onerror = function() {};
+      }
+
+      function sendRequest(method, payload) {
+        return new Promise(function(resolve, reject) {
+          if (!ws || !connected) { reject(new Error("Not connected")); return; }
+          var id = crypto.randomUUID();
+          var msg = {
+            id: id, type: "request", channel: "ipc:maestro",
+            source: "maestro", target: "main",
+            timestamp: Date.now(), method: method, payload: payload || {},
+          };
+          var timeout = setTimeout(function() {
+            pendingRequests.delete(id);
+            reject(new Error("Timeout: " + method));
+          }, 15000);
+          pendingRequests.set(id, { resolve: resolve, reject: reject, timeout: timeout });
+          ws.send(JSON.stringify(msg));
+        });
+      }
+
+      function handleMessage(msg) {
+        // Reply
+        if (msg.type === "reply" && msg.requestId) {
+          var pending = pendingRequests.get(msg.requestId);
+          if (pending) {
+            clearTimeout(pending.timeout);
+            pendingRequests.delete(msg.requestId);
+            if (msg.success) { pending.resolve(msg.payload); }
+            else { pending.reject(new Error(msg.error || "Failed")); }
+          }
+          return;
+        }
+        // Event
+        if (msg.type === "event") {
+          if (msg.event === "loop:statusChanged") {
+            updateStatus(msg.payload);
+          } else if (msg.event === "notification") {
+            addNotification(msg.payload);
+          }
+        }
+        // Welcome
+        if (msg.event === "connected") {}
+      }
+
+      // -- Status --
+      function requestStatus() {
+        sendRequest("maestro:status").then(function(data) {
+          if (data && data.data) updateStatus(data.data);
+        }).catch(function() {});
+      }
+
+      function updateStatus(status) {
+        if (!status) return;
+        loopStatus = status;
+
+        document.getElementById("status-running").textContent = String(status.running);
+        document.getElementById("status-phase").textContent = status.phase;
+        document.getElementById("status-cycle").textContent = status.currentCycle + "/" + status.totalCycles;
+        document.getElementById("status-errors").textContent = String(status.errorCount || 0);
+        document.getElementById("status-started").textContent = status.startedAt ? new Date(status.startedAt).toLocaleTimeString() : "--";
+        document.getElementById("status-last").textContent = status.lastCompletedAt ? new Date(status.lastCompletedAt).toLocaleTimeString() : "--";
+
+        cycleChip.textContent = "Cycle " + status.currentCycle + "/" + status.totalCycles;
+        phaseChip.textContent = status.phase;
+
+        // Update buttons
+        btnStart.disabled = status.running;
+        btnPause.disabled = !status.running;
+        btnStop.disabled = !status.running && status.phase === "idle";
+        btnAdvance.disabled = !status.running;
+
+        // Update phase dots
+        var phases = ["hypothesis", "modify", "score", "review", "export"];
+        var phaseIdx = phases.indexOf(status.phase);
+        document.querySelectorAll(".phase-dot").forEach(function(dot, i) {
+          dot.className = "phase-dot";
+          if (status.running) {
+            if (i < phaseIdx) dot.className += " phase-dot--done";
+            else if (i === phaseIdx) dot.className += " phase-dot--active";
+          }
+        });
+      }
+
+      // -- Score chart --
+      function updateChart() {
+        if (scores.length === 0) return;
+        var chartW = 600, chartH = 200, padL = 30, padR = 10, padT = 5, padB = 5;
+        var w = chartW - padL - padR;
+        var h = chartH - padT - padB;
+        var step = scores.length > 1 ? w / (scores.length - 1) : 0;
+
+        var points = scores.map(function(s, i) {
+          var x = padL + i * step;
+          var y = padT + (1 - s) * h;
+          return x.toFixed(1) + "," + y.toFixed(1);
+        }).join(" ");
+
+        scoreLine.setAttribute("points", points);
+
+        // Draw dots
+        scoreDots.innerHTML = "";
+        scores.forEach(function(s, i) {
+          var x = padL + i * step;
+          var y = padT + (1 - s) * h;
+          var circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+          circle.setAttribute("cx", x.toFixed(1));
+          circle.setAttribute("cy", y.toFixed(1));
+          circle.setAttribute("r", "3");
+          circle.setAttribute("fill", i > 0 && s > scores[i-1] ? "#38a169" : i > 0 && s < scores[i-1] ? "#e53e3e" : "#4299e1");
+          scoreDots.appendChild(circle);
+        });
+
+        currentScoreBadge.textContent = scores[scores.length - 1].toFixed(4);
+      }
+
+      // -- Iteration table --
+      function renderIterations() {
+        iterationCount.textContent = String(iterations.length);
+        if (iterations.length === 0) {
+          iterationTbody.innerHTML = '<tr><td colspan="7" class="empty-state">No iterations yet. Start a research loop.</td></tr>';
+          return;
+        }
+        iterationTbody.innerHTML = iterations.map(function(it) {
+          var delta = it.score_after - it.score_before;
+          var deltaClass = delta > 0.0001 ? "score--up" : delta < -0.0001 ? "score--down" : "score--neutral";
+          var deltaStr = (delta >= 0 ? "+" : "") + delta.toFixed(4);
+          var dur = ((it.finished_at - it.started_at) / 1000).toFixed(1) + "s";
+          var badgeClass = it.decision === "KEEP" ? "badge--keep" : "badge--discard";
+          return '<tr>' +
+            '<td style="font-family:var(--font-mono)">' + it.iteration + '</td>' +
+            '<td title="' + escHtml(it.hypothesis) + '">' + escHtml(truncate(it.hypothesis, 40)) + '</td>' +
+            '<td class="score-cell">' + it.score_before.toFixed(4) + '</td>' +
+            '<td class="score-cell">' + it.score_after.toFixed(4) + '</td>' +
+            '<td class="score-cell ' + deltaClass + '">' + deltaStr + '</td>' +
+            '<td><span class="badge ' + badgeClass + '">' + it.decision + '</span></td>' +
+            '<td style="font-family:var(--font-mono)">' + dur + '</td>' +
+          '</tr>';
+        }).reverse().join("");
+      }
+
+      function addIteration(it) {
+        iterations.push(it);
+        scores.push(it.score_after);
+        renderIterations();
+        updateChart();
+      }
+
+      // -- Notifications --
+      function addNotification(n) {
+        var container = notificationLog;
+        if (container.querySelector(".empty-state")) container.innerHTML = "";
+        var el = document.createElement("div");
+        el.style.cssText = "padding:3px 0;border-bottom:1px solid var(--border);font-size:11px;";
+        el.innerHTML = '<span style="color:var(--text-muted);font-family:var(--font-mono);font-size:10px;">' +
+          new Date().toLocaleTimeString() + '</span> ' +
+          '<strong style="color:var(--text-primary);">' + escHtml(n.title || "") + '</strong> ' +
+          escHtml(n.body || "");
+        container.prepend(el);
+        // Keep max 50
+        while (container.children.length > 50) container.removeChild(container.lastChild);
+      }
+
+      // -- Helpers --
+      function escHtml(s) { var d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+      function truncate(s, n) { return s && s.length > n ? s.slice(0, n) + "..." : (s || ""); }
+
+      // -- Button handlers --
+      btnStart.addEventListener("click", function() {
+        var cycles = parseInt(inputCycles.value, 10) || 10;
+        sendRequest("maestro:start", {
+          totalCycles: cycles,
+          autonomyLevel: selectedAutonomy,
+          targetArtifact: inputArtifact.value || undefined,
+        }).then(function(data) {
+          if (data && data.data) updateStatus(data.data);
+          scores = [];
+          iterations = [];
+          renderIterations();
+          updateChart();
+        }).catch(function(err) {
+          addNotification({ title: "Error", body: err.message });
+        });
+      });
+
+      btnPause.addEventListener("click", function() {
+        sendRequest("maestro:pause").then(function(data) {
+          if (data && data.data) updateStatus(data.data);
+        }).catch(function() {});
+      });
+
+      btnStop.addEventListener("click", function() {
+        sendRequest("maestro:stop").then(function(data) {
+          updateStatus({ running: false, currentCycle: 0, totalCycles: 0, phase: "idle", startedAt: null, lastCompletedAt: null, autonomyLevel: selectedAutonomy, errorCount: 0 });
+        }).catch(function() {});
+      });
+
+      btnAdvance.addEventListener("click", function() {
+        sendRequest("maestro:advance").then(function(data) {
+          if (data && data.data) updateStatus(data.data);
+          // Simulate an iteration result for demo
+          var prevScore = scores.length > 0 ? scores[scores.length - 1] : 0.3 + Math.random() * 0.2;
+          var newScore = Math.min(1, prevScore + (Math.random() * 0.1 - 0.03));
+          addIteration({
+            iteration: iterations.length,
+            hypothesis: "Improve section " + (iterations.length + 1) + " clarity and compliance alignment",
+            score_before: prevScore,
+            score_after: newScore,
+            decision: newScore > prevScore ? "KEEP" : "DISCARD",
+            started_at: Date.now() - 3000,
+            finished_at: Date.now(),
+          });
+        }).catch(function() {});
+      });
+
+      // Autonomy selector
+      document.getElementById("autonomy-selector").addEventListener("click", function(e) {
+        var btn = e.target.closest(".autonomy-btn");
+        if (!btn) return;
+        selectedAutonomy = btn.dataset.level;
+        document.querySelectorAll(".autonomy-btn").forEach(function(b) {
+          b.classList.toggle("autonomy-btn--active", b.dataset.level === selectedAutonomy);
+        });
+      });
+
+      // -- SSE for real-time updates --
+      function connectSSE() {
+        var evtSource = new EventSource("/api/events?panel=maestro");
+        evtSource.addEventListener("loop:statusChanged", function(e) {
+          try { updateStatus(JSON.parse(e.data)); } catch(err) {}
+        });
+        evtSource.addEventListener("loop:status", function(e) {
+          try { updateStatus(JSON.parse(e.data)); } catch(err) {}
+        });
+        evtSource.addEventListener("notification", function(e) {
+          try { addNotification(JSON.parse(e.data)); } catch(err) {}
+        });
+        evtSource.onerror = function() {
+          evtSource.close();
+          setTimeout(connectSSE, 5000);
+        };
+      }
+
+      // -- Boot --
+      connectWS();
+      connectSSE();
+
+    })();
+  </script>
+</body>
+</html>

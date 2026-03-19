@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Compliance Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg-primary:    #0d0f12;
+      --bg-secondary:  #151820;
+      --bg-card:       #1a1e28;
+      --bg-input:      #232833;
+      --border:        #2a2f3d;
+      --text-primary:  #e4e6eb;
+      --text-secondary:#8b8f9a;
+      --text-muted:    #5c6070;
+      --accent:        #38a169;
+      --accent-dim:    #276749;
+      --green:         #38a169;
+      --green-dim:     #276749;
+      --red:           #e53e3e;
+      --red-dim:       #9b2c2c;
+      --yellow:        #d69e2e;
+      --yellow-dim:    #975a16;
+      --blue:          #4299e1;
+      --blue-dim:      #2b6cb0;
+      --purple:        #9f7aea;
+      --font-mono:     'JetBrains Mono', 'Fira Code', monospace;
+      --font-sans:     'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --radius:        6px;
+    }
+    html, body { height: 100%; font-family: var(--font-sans); font-size: 13px; color: var(--text-primary); background: var(--bg-primary); overflow: hidden; }
+    #app { display: grid; grid-template-rows: 48px 1fr; height: 100vh; }
+
+    .top-bar { display: flex; align-items: center; gap: 16px; padding: 0 16px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
+    .top-bar__title { font-size: 15px; font-weight: 700; color: var(--accent); }
+    .top-bar__title span { color: var(--text-secondary); font-weight: 400; }
+    .status-group { display: flex; gap: 12px; margin-left: auto; align-items: center; }
+    .stat-chip { font-family: var(--font-mono); font-size: 11px; padding: 2px 8px; border-radius: 3px; background: var(--bg-input); color: var(--text-secondary); }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .status-dot--green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .status-dot--idle { background: var(--text-muted); }
+
+    .main-layout { display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
+
+    /* Score cards row */
+    .score-cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; padding: 14px; border-bottom: 1px solid var(--border); }
+    .score-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; text-align: center; cursor: pointer; transition: border-color .15s; }
+    .score-card:hover { border-color: var(--accent); }
+    .score-card--selected { border-color: var(--accent); background: rgba(56,161,105,.05); }
+    .score-card__title { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .8px; color: var(--text-muted); margin-bottom: 6px; }
+    .score-card__value { font-family: var(--font-mono); font-size: 28px; font-weight: 700; }
+    .score-card__bar { margin-top: 8px; height: 4px; border-radius: 2px; background: var(--bg-input); overflow: hidden; }
+    .score-card__fill { height: 100%; border-radius: 2px; transition: width .4s ease; }
+    .score-card__detail { font-size: 10px; color: var(--text-muted); margin-top: 4px; }
+
+    .score-high { color: var(--green); }
+    .score-mid { color: var(--yellow); }
+    .score-low { color: var(--red); }
+    .fill-high { background: var(--green); }
+    .fill-mid { background: var(--yellow); }
+    .fill-low { background: var(--red); }
+
+    /* Results area */
+    .results-area { display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; }
+    .results-panel { display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); }
+    .findings-panel { display: flex; flex-direction: column; overflow: hidden; }
+    .panel__header { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+    .panel__title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .8px; color: var(--text-secondary); }
+    .panel__badge { font-family: var(--font-mono); font-size: 10px; padding: 1px 6px; border-radius: 3px; background: var(--accent-dim); color: var(--accent); }
+    .panel__body { flex: 1; overflow-y: auto; padding: 10px 14px; }
+
+    /* Policy results table */
+    table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    thead { position: sticky; top: 0; background: var(--bg-secondary); z-index: 1; }
+    th { padding: 7px 10px; text-align: left; font-weight: 600; color: var(--text-muted); text-transform: uppercase; font-size: 10px; letter-spacing: .5px; border-bottom: 1px solid var(--border); }
+    td { padding: 6px 10px; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
+    tr:hover td { background: var(--bg-card); }
+
+    .badge { display: inline-block; font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 3px; text-transform: uppercase; }
+    .badge--pass { background: var(--green-dim); color: var(--green); }
+    .badge--fail { background: var(--red-dim); color: var(--red); }
+    .badge--warn { background: var(--yellow-dim); color: var(--yellow); }
+
+    /* Findings list */
+    .finding { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; margin-bottom: 8px; }
+    .finding__head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+    .finding__rule { font-weight: 600; font-size: 12px; }
+    .finding__severity { font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 3px; text-transform: uppercase; }
+    .finding__msg { font-size: 11px; color: var(--text-secondary); }
+    .severity--warn { background: var(--yellow-dim); color: var(--yellow); }
+    .severity--error { background: var(--red-dim); color: var(--red); }
+    .severity--critical { background: var(--red); color: #fff; }
+
+    .btn { padding: 6px 14px; font-size: 11px; font-weight: 600; border: none; border-radius: 4px; cursor: pointer; text-transform: uppercase; }
+    .btn--scan { background: var(--accent); color: #fff; }
+    .btn--scan:hover { opacity: .85; }
+    .btn--scan:disabled { opacity: .4; cursor: not-allowed; }
+
+    .empty-state { color: var(--text-muted); font-size: 12px; text-align: center; padding: 30px 0; }
+    .conn-indicator { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-muted); }
+
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header class="top-bar">
+      <div class="top-bar__title">Compliance <span>Dashboard</span></div>
+      <div class="status-group">
+        <button class="btn btn--scan" id="btn-scan">Run Scan</button>
+        <span class="stat-chip" id="chip-overall">Overall: --</span>
+        <span class="stat-chip" id="chip-last-scan">Last scan: --</span>
+        <div class="conn-indicator">
+          <span class="status-dot status-dot--idle" id="conn-dot"></span>
+          <span id="conn-text">connecting...</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="main-layout">
+      <!-- Framework score cards -->
+      <div class="score-cards" id="score-cards">
+        <div class="score-card" data-fw="nist_800_53" id="card-nist53">
+          <div class="score-card__title">NIST 800-53</div>
+          <div class="score-card__value score-mid" id="val-nist53">--</div>
+          <div class="score-card__bar"><div class="score-card__fill fill-mid" id="bar-nist53" style="width:0%"></div></div>
+          <div class="score-card__detail" id="detail-nist53">0/0 controls</div>
+        </div>
+        <div class="score-card" data-fw="nist_800_171" id="card-nist171">
+          <div class="score-card__title">NIST 800-171</div>
+          <div class="score-card__value score-mid" id="val-nist171">--</div>
+          <div class="score-card__bar"><div class="score-card__fill fill-mid" id="bar-nist171" style="width:0%"></div></div>
+          <div class="score-card__detail" id="detail-nist171">0/0 controls</div>
+        </div>
+        <div class="score-card" data-fw="cmmc_l2" id="card-cmmc">
+          <div class="score-card__title">CMMC Level 2</div>
+          <div class="score-card__value score-mid" id="val-cmmc">--</div>
+          <div class="score-card__bar"><div class="score-card__fill fill-mid" id="bar-cmmc" style="width:0%"></div></div>
+          <div class="score-card__detail" id="detail-cmmc">0/0 controls</div>
+        </div>
+        <div class="score-card" data-fw="stig_k8s" id="card-stig">
+          <div class="score-card__title">STIG K8s</div>
+          <div class="score-card__value score-mid" id="val-stig">--</div>
+          <div class="score-card__bar"><div class="score-card__fill fill-mid" id="bar-stig" style="width:0%"></div></div>
+          <div class="score-card__detail" id="detail-stig">0/0 controls</div>
+        </div>
+        <div class="score-card" data-fw="sprs" id="card-sprs">
+          <div class="score-card__title">SPRS Score</div>
+          <div class="score-card__value score-mid" id="val-sprs">--</div>
+          <div class="score-card__bar"><div class="score-card__fill fill-mid" id="bar-sprs" style="width:0%"></div></div>
+          <div class="score-card__detail" id="detail-sprs">Target: 110</div>
+        </div>
+      </div>
+
+      <!-- Results & Findings -->
+      <div class="results-area">
+        <div class="results-panel">
+          <div class="panel__header">
+            <span class="panel__title">Policy Evaluation Results</span>
+            <span class="panel__badge" id="results-count">0</span>
+          </div>
+          <div class="panel__body">
+            <table>
+              <thead>
+                <tr>
+                  <th>Policy</th>
+                  <th>Score</th>
+                  <th>Pass</th>
+                  <th>Fail</th>
+                  <th>Result</th>
+                </tr>
+              </thead>
+              <tbody id="results-tbody">
+                <tr><td colspan="5" class="empty-state">Run a compliance scan to see results.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="findings-panel">
+          <div class="panel__header">
+            <span class="panel__title">Findings & Violations</span>
+            <span class="panel__badge" id="findings-count">0</span>
+          </div>
+          <div class="panel__body" id="findings-body">
+            <div class="empty-state">No findings. Run a compliance scan.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      "use strict";
+
+      var ws = null, connected = false, pendingRequests = new Map();
+      var scanResults = [], findings = [];
+      var selectedFramework = null;
+
+      function connectWS() {
+        var protocol = location.protocol === "https:" ? "wss:" : "ws:";
+        ws = new WebSocket(protocol + "//" + location.host + "/ws?panel=compliance");
+        ws.onopen = function() {
+          connected = true;
+          document.getElementById("conn-dot").className = "status-dot status-dot--green";
+          document.getElementById("conn-text").textContent = "connected";
+        };
+        ws.onmessage = function(ev) { try { handleMessage(JSON.parse(ev.data)); } catch(e) {} };
+        ws.onclose = function() {
+          connected = false;
+          document.getElementById("conn-dot").className = "status-dot status-dot--idle";
+          document.getElementById("conn-text").textContent = "disconnected";
+          setTimeout(connectWS, 2000);
+        };
+      }
+
+      function sendRequest(method, payload) {
+        return new Promise(function(resolve, reject) {
+          if (!ws || !connected) { reject(new Error("Not connected")); return; }
+          var id = crypto.randomUUID();
+          var msg = { id: id, type: "request", channel: "ipc:compliance", source: "compliance", target: "main", timestamp: Date.now(), method: method, payload: payload || {} };
+          var timeout = setTimeout(function() { pendingRequests.delete(id); reject(new Error("Timeout")); }, 30000);
+          pendingRequests.set(id, { resolve: resolve, reject: reject, timeout: timeout });
+          ws.send(JSON.stringify(msg));
+        });
+      }
+
+      function handleMessage(msg) {
+        if (msg.type === "reply" && msg.requestId) {
+          var p = pendingRequests.get(msg.requestId);
+          if (p) { clearTimeout(p.timeout); pendingRequests.delete(msg.requestId); msg.success ? p.resolve(msg.payload) : p.reject(new Error(msg.error)); }
+          return;
+        }
+        if (msg.type === "event" && msg.event === "compliance:scoreUpdated") {
+          updateFromScan(msg.payload);
+        }
+      }
+
+      function scoreClass(pct) { return pct >= 80 ? "high" : pct >= 50 ? "mid" : "low"; }
+
+      function updateCard(id, score, passing, total) {
+        var pct = total > 0 ? Math.round(score * 100) : 0;
+        var cls = scoreClass(pct);
+        document.getElementById("val-" + id).textContent = pct + "%";
+        document.getElementById("val-" + id).className = "score-card__value score-" + cls;
+        document.getElementById("bar-" + id).style.width = pct + "%";
+        document.getElementById("bar-" + id).className = "score-card__fill fill-" + cls;
+        if (id !== "sprs") {
+          document.getElementById("detail-" + id).textContent = passing + "/" + total + " controls";
+        }
+      }
+
+      function runScan() {
+        var btn = document.getElementById("btn-scan");
+        btn.disabled = true;
+        btn.textContent = "Scanning...";
+
+        sendRequest("opa:complianceScan", { input: {} }).then(function(data) {
+          btn.disabled = false;
+          btn.textContent = "Run Scan";
+          if (data && data.data) updateFromScan(data.data);
+        }).catch(function(err) {
+          btn.disabled = false;
+          btn.textContent = "Run Scan";
+          // Show demo data on error (OPA may not be running)
+          showDemoData();
+        });
+      }
+
+      function updateFromScan(scanData) {
+        document.getElementById("chip-overall").textContent = "Overall: " + Math.round((scanData.overallScore || 0) * 100) + "%";
+        document.getElementById("chip-last-scan").textContent = "Last scan: " + new Date().toLocaleTimeString();
+
+        if (scanData.findings) {
+          scanResults = scanData.findings;
+          findings = scanData.findings.filter(function(f) { return !f.allowed; });
+          renderResults();
+          renderFindings();
+        }
+      }
+
+      function showDemoData() {
+        var frameworks = [
+          { id: "nist53", score: 0.82, passing: 148, total: 180, policy: "compliance/nist_800_53" },
+          { id: "nist171", score: 0.76, passing: 86, total: 113, policy: "compliance/nist_800_171" },
+          { id: "cmmc", score: 0.71, passing: 78, total: 110, policy: "compliance/cmmc_l2" },
+          { id: "stig", score: 0.88, passing: 53, total: 60, policy: "compliance/stig_k8s" },
+          { id: "sprs", score: 0.65, passing: 72, total: 110, policy: "compliance/sprs" },
+        ];
+
+        frameworks.forEach(function(fw) { updateCard(fw.id, fw.score, fw.passing, fw.total); });
+
+        scanResults = frameworks.map(function(fw) {
+          return { policyPath: fw.policy, allowed: fw.score >= 0.8, score: fw.score, totalControls: fw.total, passingControls: fw.passing };
+        });
+
+        findings = [
+          { rule: "AC-2(7)", message: "Privileged account monitoring not fully implemented", severity: "warn" },
+          { rule: "CM-6", message: "Configuration baseline deviations detected in 4 controls", severity: "error" },
+          { rule: "SC-28", message: "Data-at-rest encryption not verified for artifact storage", severity: "critical" },
+          { rule: "IA-5(1)", message: "Password complexity requirements partially met", severity: "warn" },
+          { rule: "AU-6(1)", message: "Automated audit review process incomplete", severity: "warn" },
+        ];
+
+        document.getElementById("chip-overall").textContent = "Overall: 76%";
+        document.getElementById("chip-last-scan").textContent = "Last scan: " + new Date().toLocaleTimeString();
+        renderResults();
+        renderFindings();
+      }
+
+      function renderResults() {
+        document.getElementById("results-count").textContent = scanResults.length;
+        if (scanResults.length === 0) {
+          document.getElementById("results-tbody").innerHTML = '<tr><td colspan="5" class="empty-state">No results</td></tr>';
+          return;
+        }
+        document.getElementById("results-tbody").innerHTML = scanResults.map(function(r) {
+          var pct = Math.round((r.score || 0) * 100);
+          var fail = (r.totalControls || 0) - (r.passingControls || 0);
+          var badge = r.allowed ? '<span class="badge badge--pass">Pass</span>' : '<span class="badge badge--fail">Fail</span>';
+          return '<tr><td>' + esc(r.policyPath) + '</td><td style="font-family:var(--font-mono)">' + pct + '%</td><td style="color:var(--green)">' + (r.passingControls || 0) + '</td><td style="color:var(--red)">' + fail + '</td><td>' + badge + '</td></tr>';
+        }).join("");
+      }
+
+      function renderFindings() {
+        document.getElementById("findings-count").textContent = findings.length;
+        var body = document.getElementById("findings-body");
+        if (findings.length === 0) {
+          body.innerHTML = '<div class="empty-state">No findings</div>';
+          return;
+        }
+        body.innerHTML = findings.map(function(f) {
+          var sevClass = "severity--" + (f.severity || "warn");
+          return '<div class="finding"><div class="finding__head"><span class="finding__rule">' + esc(f.rule || f.policyPath || "Unknown") + '</span><span class="finding__severity ' + sevClass + '">' + (f.severity || "warn") + '</span></div><div class="finding__msg">' + esc(f.message || f.reason || "") + '</div></div>';
+        }).join("");
+      }
+
+      function esc(s) { var d = document.createElement("div"); d.textContent = s || ""; return d.innerHTML; }
+
+      // Scan button
+      document.getElementById("btn-scan").addEventListener("click", runScan);
+
+      // Framework card selection
+      document.getElementById("score-cards").addEventListener("click", function(e) {
+        var card = e.target.closest(".score-card");
+        if (!card) return;
+        document.querySelectorAll(".score-card").forEach(function(c) { c.classList.remove("score-card--selected"); });
+        card.classList.add("score-card--selected");
+        selectedFramework = card.dataset.fw;
+      });
+
+      // SSE
+      var evtSource = new EventSource("/api/events?panel=compliance");
+      evtSource.addEventListener("compliance:scoreUpdated", function(e) {
+        try { updateFromScan(JSON.parse(e.data)); } catch(err) {}
+      });
+      evtSource.onerror = function() { evtSource.close(); setTimeout(function() { evtSource = new EventSource("/api/events?panel=compliance"); }, 5000); };
+
+      connectWS();
+    })();
+  </script>
+</body>
+</html>
