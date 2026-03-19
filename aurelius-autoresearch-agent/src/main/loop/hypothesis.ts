@@ -4,12 +4,44 @@
  * Runs the hypothesis-generator agent inside an OpenShell sandbox,
  * routes the LLM call through the privacy router, and returns a ranked
  * list of hypotheses for the current artifact state.
+ *
+ * Supports two modes:
+ * 1. Sandboxed: Full privacy-routed execution via OpenShell containers
+ * 2. Direct: LLM API call without sandboxing (for local/dev mode)
  */
 
-import type { SandboxManager, SandboxHandle } from "../nemoclaw/sandbox";
-import type { PrivacyRouter } from "../nemoclaw/privacy-router";
-import type { SecurityLogger } from "../nemoclaw/security-logger";
 import type { Hypothesis, LearningRecord, RunConfig } from "./types";
+
+// ---------------------------------------------------------------------------
+// Sandbox-based interfaces (production mode)
+// ---------------------------------------------------------------------------
+
+export interface SandboxManager {
+  spawn(role: string, opts: { timeoutMs: number; maxMemoryMb: number }): Promise<SandboxHandle>;
+  exec(handle: SandboxHandle, cmd: { command: string; payload: unknown; timeoutMs: number }): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+  terminate(handle: SandboxHandle): Promise<void>;
+}
+
+export interface SandboxHandle {
+  id: string;
+  role: string;
+  status: "running" | "terminated" | "error";
+}
+
+export interface PrivacyRouter {
+  route(req: { model: string; prompt: string; sandboxId: string }): Promise<{
+    path: "local" | "federated" | "cloud_sanitized" | "blocked";
+    endpoint: string;
+    sanitizedPrompt: string;
+  }>;
+}
+
+export interface SecurityLogger {
+  info(msg: string, ctx?: Record<string, unknown>): void;
+  warn(msg: string, ctx?: Record<string, unknown>): void;
+  error(msg: string, ctx?: Record<string, unknown>): void;
+  critical(msg: string, ctx?: Record<string, unknown>): void;
+}
 
 export interface HypothesisGeneratorDeps {
   sandbox: SandboxManager;
@@ -17,6 +49,10 @@ export interface HypothesisGeneratorDeps {
   security: SecurityLogger;
   config: RunConfig;
 }
+
+// ---------------------------------------------------------------------------
+// Sandboxed generation (production)
+// ---------------------------------------------------------------------------
 
 /**
  * Spawn a sandboxed hypothesis-generator, execute LLM inference through the
@@ -98,6 +134,115 @@ export async function generateHypotheses(
 }
 
 // ---------------------------------------------------------------------------
+// Direct LLM generation (dev/local mode)
+// ---------------------------------------------------------------------------
+
+export interface DirectLLMConfig {
+  provider: "anthropic" | "ollama";
+  apiKey?: string;
+  endpoint: string;
+  model: string;
+  maxTokens: number;
+  temperature: number;
+}
+
+/**
+ * Generate hypotheses via direct LLM API call (no sandbox).
+ * Uses Bun's native fetch for HTTP requests.
+ *
+ * Supports:
+ * - Anthropic Claude API
+ * - Ollama local API
+ */
+export async function generateHypothesesDirect(
+  llmConfig: DirectLLMConfig,
+  artifact: string,
+  currentScore: number,
+  priorLearnings: LearningRecord[],
+): Promise<Hypothesis[]> {
+  const prompt = buildPrompt(artifact, currentScore, priorLearnings);
+  const startMs = Date.now();
+
+  let responseText: string;
+
+  if (llmConfig.provider === "anthropic") {
+    responseText = await callAnthropic(llmConfig, prompt);
+  } else if (llmConfig.provider === "ollama") {
+    responseText = await callOllama(llmConfig, prompt);
+  } else {
+    throw new Error(`Unsupported LLM provider: ${llmConfig.provider}`);
+  }
+
+  const hypotheses = parseHypotheses(responseText);
+  const durationMs = Date.now() - startMs;
+
+  console.log(
+    `[Hypothesis] Generated ${hypotheses.length} hypotheses via ${llmConfig.provider} in ${durationMs}ms`,
+  );
+
+  return hypotheses;
+}
+
+async function callAnthropic(config: DirectLLMConfig, prompt: string): Promise<string> {
+  if (!config.apiKey) throw new Error("Anthropic API key required");
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": config.apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: config.model,
+      max_tokens: config.maxTokens,
+      temperature: config.temperature,
+      messages: [{ role: "user", content: prompt }],
+    }),
+    signal: AbortSignal.timeout(120_000),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Anthropic API error: ${response.status} ${response.statusText}`);
+  }
+
+  const json = (await response.json()) as {
+    content: Array<{ type: string; text: string }>;
+  };
+
+  return json.content
+    .filter((c) => c.type === "text")
+    .map((c) => c.text)
+    .join("");
+}
+
+async function callOllama(config: DirectLLMConfig, prompt: string): Promise<string> {
+  const endpoint = config.endpoint || "http://localhost:11434";
+
+  const response = await fetch(`${endpoint}/api/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: config.model,
+      prompt,
+      stream: false,
+      options: {
+        temperature: config.temperature,
+        num_predict: config.maxTokens,
+      },
+    }),
+    signal: AbortSignal.timeout(120_000),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
+  }
+
+  const json = (await response.json()) as { response: string };
+  return json.response;
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -145,7 +290,11 @@ function parseHypotheses(raw: string): Hypothesis[] {
       .replace(/\s*```\s*$/m, "")
       .trim();
 
-    const parsed: unknown = JSON.parse(cleaned);
+    // Try to find JSON array in the response
+    const jsonMatch = cleaned.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return [];
+
+    const parsed: unknown = JSON.parse(jsonMatch[0]);
     if (!Array.isArray(parsed)) {
       return [];
     }
@@ -162,7 +311,7 @@ function parseHypotheses(raw: string): Hypothesis[] {
         id: h.id as string,
         text: h.text as string,
         rationale: h.rationale as string,
-        confidence: h.confidence as number,
+        confidence: Math.max(0, Math.min(1, h.confidence as number)),
       }))
       .sort((a, b) => b.confidence - a.confidence);
   } catch {
